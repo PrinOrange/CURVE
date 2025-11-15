@@ -1,59 +1,54 @@
-import pandas as pd
-import numpy as np
 import csv
-import pickle
-import re
-import torch
-import sklearn
 import os
+import pickle
 import random
+import re
+from pathlib import Path
+from typing import List
+
 import clang
+import numpy as np
+import pandas as pd
+import sklearn
+import torch
 from clang import *
 from clang import cindex
-from pathlib import Path
-from tokenizers import ByteLevelBPETokenizer
-from tokenizers.implementations import ByteLevelBPETokenizer
-from tokenizers.processors import BertProcessing
-from torch.utils.data import Dataset, DataLoader, IterableDataset
-from transformers import RobertaConfig
-from transformers import RobertaForMaskedLM, RobertaForSequenceClassification
-from transformers import RobertaTokenizerFast
-from transformers import DataCollatorForLanguageModeling
-from transformers import Trainer, TrainingArguments
-from transformers import LineByLineTextDataset, pretoke
-from transformers.modeling_outputs import SequenceClassifierOutput
-from tokenizers import Tokenizer
-from tokenizers import normalizers, decoders
-from tokenizers.normalizers import StripAccents, unicode_normalizer_from_str, Replace
-from tokenizers.processors import TemplateProcessing
-from tokenizers import processors, pre_tokenizers
-from tokenizers.models import BPE
-from tokenizers.pre_tokenizers import PreTokenizer
-from tokenizers.pre_tokenizers import Whitespace
-from tokenizers import NormalizedString, PreTokenizedString
-from typing import List
-from Consts.Paths import VOCAB_INPUT_PATH, MERGES_INPUT_PATH
+from Consts.Paths import MERGES_FILE_PATH, VOCAB_FILE_PATH
 from Consts.Tokens import ROBERTA_SPECIAL_TOKENS
-from CweBert.Tokenizer import CweBertTokenizer
 from CweBert.DataCollator import CweBERTCollatorForLanguageModeling
+from CweBert.Tokenizer import CweBertTokenizer
+from tokenizers import (ByteLevelBPETokenizer, NormalizedString,
+                        PreTokenizedString, Tokenizer, decoders, normalizers,
+                        pre_tokenizers, processors)
+from tokenizers.implementations import ByteLevelBPETokenizer
+from tokenizers.models import BPE
+from tokenizers.normalizers import (Replace, StripAccents,
+                                    unicode_normalizer_from_str)
+from tokenizers.pre_tokenizers import PreTokenizer, Whitespace
+from tokenizers.processors import BertProcessing, TemplateProcessing
+from torch.utils.data import DataLoader, Dataset, IterableDataset
+from transformers import (DataCollatorForLanguageModeling,
+                          LineByLineTextDataset, RobertaConfig,
+                          RobertaForMaskedLM, RobertaForSequenceClassification,
+                          RobertaTokenizerFast, Trainer, TrainingArguments,
+                          pretoke)
+from transformers.modeling_outputs import SequenceClassifierOutput
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(device)
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(DEVICE)
 
 torch.backends.cudnn.enabled = True
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
-vocab, merges = BPE.read_file(vocab=VOCAB_INPUT_PATH, merges=MERGES_INPUT_PATH)
-my_tokenizer = Tokenizer(BPE(vocab, merges))
-my_tokenizer.normalizer = normalizers.Sequence([StripAccents(), Replace(" ", "Ä")])
-my_tokenizer.pre_tokenizer = PreTokenizer.custom(CweBertTokenizer())
-my_tokenizer.post_processor = processors.ByteLevel(trim_offsets=False)
-my_tokenizer.post_processor = TemplateProcessing(
-    single="<s> $A </s>",
-    special_tokens=[
-        (token, index) for index, token in enumerate(ROBERTA_SPECIAL_TOKENS)
-    ],
+vocab, merges = BPE.read_file(vocab=VOCAB_FILE_PATH, merges=MERGES_FILE_PATH)
+
+tokenizer = Tokenizer(BPE(vocab, merges))
+tokenizer.pre_tokenizer = PreTokenizer.custom(CweBertTokenizer())
+tokenizer.post_processor = TemplateProcessing(
+        single="<s> $A </s>",
+        pair="<s> $A </s> </s> $B </s>",
+        special_tokens=[(tok, i) for i, tok in enumerate(ROBERTA_SPECIAL_TOKENS)],
 )
 
 model = RobertaForSequenceClassification.from_pretrained("./models/VB-MLP_%s")

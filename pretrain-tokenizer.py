@@ -1,6 +1,6 @@
 from os import environ
 
-from Consts.Paths import TOKENIZER_OUTPUT_PATH
+from Consts.Paths import MODELS_DIR
 from Consts.Tokens import ROBERTA_SPECIAL_TOKENS, SPECIAL_TOKENS
 from CweBert.Tokenizer import CweBertTokenizer
 from datasets import load_dataset
@@ -55,7 +55,7 @@ def start_pretokenization():
         special_tokens=SPECIAL_TOKENS,
     )
     tokenizer.train_from_iterator(code_corpus, trainer)
-    tokenizer.model.save(TOKENIZER_OUTPUT_PATH, "cwebert")
+    tokenizer.model.save(MODELS_DIR, "cwebert")
 
 
 if __name__ == "__main__":
