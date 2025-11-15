@@ -10,23 +10,26 @@ from tokenizers.pre_tokenizers import PreTokenizer
 from tokenizers.processors import TemplateProcessing
 from tokenizers.trainers import BpeTrainer
 
+# Enable multi-thread BPE procession
 environ["TOKENIZERS_PARALLELISM"] = "true"
 
+# Huggingface dataset configuration
 HF_DATASET_PATH = "codemetic/curve"
 HF_DATASET_SUBSET = "pretrain"
 HF_DATASET_SPILT = "train"
 
+# Program default args
 DEFAULT_PROGRAM_ARGS = {
     # The size of the vocabularies. For code corpus, the size 30,000 is enough.
-    "VOCAB_SIZE": 30000,
+    "vocab_size": 30_000,
     # The minimum frequency of the token that should be attended to.
-    "MIN_FREQUENCY": 3,
+    "min_frequency": 3,
     # Enable this option if you want to load dataset in streaming rather than download full dataset.
-    "STREAMING_LOAD_DATASET": False,
+    "streaming_load": False,
 }
 
 
-def startPretokenization():
+def start_pretokenization():
     print("Start Pretraining tokenizer and generating vocabulary.")
     print("It may take some times...")
 
@@ -38,22 +41,22 @@ def startPretokenization():
         special_tokens=[(tok, i) for i, tok in enumerate(ROBERTA_SPECIAL_TOKENS)],
     )
 
-    PretrainingCorpus = load_dataset(
+    code_corpus = load_dataset(
         path=HF_DATASET_PATH,
         name=HF_DATASET_SUBSET,
         split=HF_DATASET_SPILT,
-        streaming=DEFAULT_PROGRAM_ARGS["STREAMING_LOAD_DATASET"],
+        streaming=DEFAULT_PROGRAM_ARGS["streaming_load"],
     )["source"]
 
     trainer = BpeTrainer(
-        vocab_size=DEFAULT_PROGRAM_ARGS["VOCAB_SIZE"],
-        min_frequency=DEFAULT_PROGRAM_ARGS["MIN_FREQUENCY"],
+        vocab_size=DEFAULT_PROGRAM_ARGS["vocab_size"],
+        min_frequency=DEFAULT_PROGRAM_ARGS["min_frequency"],
         show_progress=True,
         special_tokens=SPECIAL_TOKENS,
     )
-    tokenizer.train_from_iterator(PretrainingCorpus, trainer)
+    tokenizer.train_from_iterator(code_corpus, trainer)
     tokenizer.model.save(TOKENIZER_OUTPUT_PATH, "cwebert")
 
 
 if __name__ == "__main__":
-    startPretokenization()
+    start_pretokenization()
