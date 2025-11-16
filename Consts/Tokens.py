@@ -1,4 +1,4 @@
-ROBERTA_SPECIAL_TOKENS = [
+DEFAULT_SPECIAL_TOKENS = [
     "<s>",
     "<pad>",
     "</s>",
@@ -447,7 +447,8 @@ PROGRAM_BUILTIN_TOKENS = [
     "wmemset",
     "wprintf",
     "wscanf",
+    "std::",
 ]
 
 
-SPECIAL_TOKENS = ROBERTA_SPECIAL_TOKENS + PROGRAM_BUILTIN_TOKENS
+SPECIAL_TOKENS = DEFAULT_SPECIAL_TOKENS + PROGRAM_BUILTIN_TOKENS

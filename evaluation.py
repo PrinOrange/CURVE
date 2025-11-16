@@ -14,7 +14,7 @@ import torch
 from clang import *
 from clang import cindex
 from Consts.Paths import MERGES_FILE_PATH, VOCAB_FILE_PATH
-from Consts.Tokens import ROBERTA_SPECIAL_TOKENS
+from Consts.Tokens import DEFAULT_SPECIAL_TOKENS
 from CweBert.DataCollator import CweBERTCollatorForLanguageModeling
 from CweBert.Tokenizer import CweBertTokenizer
 from tokenizers import (ByteLevelBPETokenizer, NormalizedString,
@@ -48,7 +48,7 @@ tokenizer.pre_tokenizer = PreTokenizer.custom(CweBertTokenizer())
 tokenizer.post_processor = TemplateProcessing(
         single="<s> $A </s>",
         pair="<s> $A </s> </s> $B </s>",
-        special_tokens=[(tok, i) for i, tok in enumerate(ROBERTA_SPECIAL_TOKENS)],
+        special_tokens=[(tok, i) for i, tok in enumerate(DEFAULT_SPECIAL_TOKENS)],
 )
 
 model = RobertaForSequenceClassification.from_pretrained("./models/VB-MLP_%s")
