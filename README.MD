@@ -35,13 +35,13 @@ conda activate curve
 首先，进行预分词训练，生成词表文件。
 
 ```bash
-python pretrain-tokenizer.py
+python pretokenize.py
 ```
 
 然后再进行 MLM 训练，得到预训练后的 CweBERT.
 
 ```bash
-python pretrain-mlm.py
+python mlm.py
 ```
 
 最后再针对某一数据集进行训练，得到训练后的 CweBERT

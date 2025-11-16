@@ -21,7 +21,7 @@ HF_DATASET_SPILT = "train"
 # Program default args
 DEFAULT_PROGRAM_ARGS = {
     # The size of the vocabularies. For code corpus, the size 30,000 is enough.
-    "vocab_size": 30_000,
+    "vocab_size": 50_000,
     # The minimum frequency of the token that should be attended to.
     "min_frequency": 3,
     # Enable this option if you want to load dataset in streaming rather than download full dataset.
@@ -55,7 +55,7 @@ def start_pretokenization():
         special_tokens=SPECIAL_TOKENS,
     )
     tokenizer.train_from_iterator(code_corpus, trainer)
-    tokenizer.model.save(MODELS_DIR, "cwebert")
+    tokenizer.model.save(MODELS_DIR)
 
 
 if __name__ == "__main__":
