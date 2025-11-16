@@ -1,7 +1,7 @@
 from os import environ
 
 from Consts.Paths import MODELS_DIR
-from Consts.Tokens import ROBERTA_SPECIAL_TOKENS, SPECIAL_TOKENS
+from Consts.Tokens import ROBERTA_SPECIAL_TOKENS,PROGRAM_BUILTIN_TOKENS
 from CweBert.Tokenizer import CweBertTokenizer
 from datasets import load_dataset
 from tokenizers import Tokenizer
@@ -34,6 +34,7 @@ def start_pretokenization():
     print("It may take some times...")
 
     tokenizer = Tokenizer(BPE())
+    tokenizer.add_tokens(PROGRAM_BUILTIN_TOKENS)
     tokenizer.pre_tokenizer = PreTokenizer.custom(CweBertTokenizer())
     tokenizer.post_processor = TemplateProcessing(
         single="<s> $A </s>",
@@ -52,7 +53,7 @@ def start_pretokenization():
         vocab_size=DEFAULT_PROGRAM_ARGS["vocab_size"],
         min_frequency=DEFAULT_PROGRAM_ARGS["min_frequency"],
         show_progress=True,
-        special_tokens=SPECIAL_TOKENS,
+        special_tokens=ROBERTA_SPECIAL_TOKENS,
     )
     tokenizer.train_from_iterator(code_corpus, trainer)
     tokenizer.model.save(MODELS_DIR)
