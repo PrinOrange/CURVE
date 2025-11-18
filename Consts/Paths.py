@@ -9,5 +9,5 @@ REPORT_DIR = path.join(CWD, "report")
 MODELS_DIR = path.join(CWD, "out")
 
 # Pretokenization output
-VOCAB_FILE_PATH = path.join(MODELS_DIR, "vovab.json")
+VOCAB_FILE_PATH = path.join(MODELS_DIR, "vocab.json")
 MERGES_FILE_PATH = path.join(MODELS_DIR, "merges.txt")
