@@ -1,4 +1,3 @@
-import os
 import torch
 from datasets import load_dataset
 from Consts.Paths import MODELS_DIR
@@ -16,7 +15,7 @@ from transformers import (
 # -----------------------------
 HF_DATASET_PATH = "codemetic/curve"
 HF_DATASET_SUBSET = "pretrain"
-HF_DATASET_SPLIT = "train[:100]"
+HF_DATASET_SPLIT = "train"
 OUTPUT_DIR = "./out"
 
 # 设备
@@ -82,7 +81,7 @@ training_args = TrainingArguments(
     output_dir=OUTPUT_DIR,
     overwrite_output_dir=True,
     do_train=True,
-    per_device_train_batch_size=8,
+    per_device_train_batch_size=64,
     num_train_epochs=10,
     save_steps=10000,
     save_total_limit=4,
