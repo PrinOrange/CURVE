@@ -14,10 +14,22 @@ from transformers import (
 # -----------------------------
 # 配置
 # -----------------------------
+RANDOM_SEED = 42
+EPOCHS = 10
+BATCH_SIZE = 64
+
+CHECK_STEPS = 2000
+LOGGING_STEPS = 500
+EARLY_STOP_PATIENT = 5
+
 HF_DATASET_PATH = "codemetic/curve"
 HF_DATASET_SUBSET = "pretrain"
 HF_DATASET_SPLIT = "train"
 HF_MODEL_PATH = "microsoft/graphcodebert-base"
+TESTSET_SIZE = 0.05
+
+MAX_TOKEN_LENGTH = 512
+
 OUTPUT_DIR = "./out"
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -35,10 +47,7 @@ raw_corpus = load_dataset(
 # -----------------------------
 # 划分 train / eval
 # -----------------------------
-split = raw_corpus.train_test_split(
-    test_size=0.05,   # 通常 1%～5% 都够用
-    seed=42
-)
+split = raw_corpus.train_test_split(test_size=TESTSET_SIZE, seed=RANDOM_SEED)  # 通常 1%～5% 都够用
 train_corpus = split["train"]
 eval_corpus = split["test"]
 
@@ -57,19 +66,16 @@ def preprocess(examples):
     return tokenizer(
         examples["source"],
         truncation=True,
-        max_length=512,
+        max_length=MAX_TOKEN_LENGTH,
     )
 
+
 tokenized_train = train_corpus.map(
-    preprocess,
-    batched=True,
-    remove_columns=["source", "id"]
+    preprocess, batched=True, remove_columns=["source", "id"]
 )
 
 tokenized_eval = eval_corpus.map(
-    preprocess,
-    batched=True,
-    remove_columns=["source", "id"]
+    preprocess, batched=True, remove_columns=["source", "id"]
 )
 
 # -----------------------------
@@ -96,32 +102,26 @@ training_args = TrainingArguments(
     output_dir=OUTPUT_DIR,
     overwrite_output_dir=True,
     do_train=True,
-
     # ==== 训练批次 ====
-    per_device_train_batch_size=64,
-
+    per_device_train_batch_size=BATCH_SIZE,
     # ==== 训练轮数 ====
-    num_train_epochs=10,
-
+    num_train_epochs=EPOCHS,
     # ==== 评估 ====
     eval_strategy="steps",
-    eval_steps=2000,                  # 每 2000 steps 评估一次
-    load_best_model_at_end=True,      # 自动加载最佳 checkpoint
-    metric_for_best_model="loss",     # 使用 eval_loss 选择最佳模型
-    greater_is_better=False,          # loss 越低越好
-
+    eval_steps=CHECK_STEPS,  # 每 2000 steps 评估一次
+    load_best_model_at_end=True,  # 自动加载最佳 checkpoint
+    metric_for_best_model="loss",  # 使用 eval_loss 选择最佳模型
+    greater_is_better=False,  # loss 越低越好
     # ==== Checkpoint ====
-    save_steps=2000,
+    save_steps=CHECK_STEPS,
     save_strategy="steps",
     save_total_limit=4,
-
     # ==== Logging ====
-    logging_steps=500,
-
+    logging_steps=LOGGING_STEPS,
     # ==== Early stopping ====
     # 若 5 次 eval 后 eval_loss 无改善 → 停止训练
     # patience = eval 次数，不是 epoch
-    seed=42,
+    seed=RANDOM_SEED,
 )
 
 # -----------------------------
@@ -134,7 +134,7 @@ trainer = Trainer(
     eval_dataset=tokenized_eval,
     data_collator=data_collator,
     callbacks=[
-        EarlyStoppingCallback(early_stopping_patience=5)  # 早停
+        EarlyStoppingCallback(early_stopping_patience=EARLY_STOP_PATIENT)  # 早停
     ],
 )
 
