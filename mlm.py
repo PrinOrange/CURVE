@@ -25,7 +25,7 @@ EARLY_STOP_PATIENT = 5
 HF_DATASET_PATH = "codemetic/curve"
 HF_DATASET_SUBSET = "pretrain"
 HF_DATASET_SPLIT = "train"
-HF_MODEL_PATH = "microsoft/graphcodebert-base"
+HF_UPSTREAM_MODEL_PATH = "microsoft/graphcodebert-base"
 TESTSET_SIZE = 0.05
 
 MLM_PROBABILITY = 0.15
@@ -94,8 +94,8 @@ data_collator = DataCollatorForLanguageModeling(
 # -----------------------------
 # 模型
 # -----------------------------
-config = RobertaConfig.from_pretrained(HF_MODEL_PATH)
-model = RobertaForMaskedLM.from_pretrained(HF_MODEL_PATH).to(DEVICE)
+config = RobertaConfig.from_pretrained(HF_UPSTREAM_MODEL_PATH)
+model = RobertaForMaskedLM.from_pretrained(HF_UPSTREAM_MODEL_PATH).to(DEVICE)
 
 print("Model parameters:", model.num_parameters())
 
