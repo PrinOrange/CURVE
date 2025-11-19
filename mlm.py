@@ -36,7 +36,7 @@ raw_corpus = load_dataset(
 # 划分 train / eval
 # -----------------------------
 split = raw_corpus.train_test_split(
-    test_size=0.02,   # 通常 1%～5% 都够用
+    test_size=0.05,   # 通常 1%～5% 都够用
     seed=42
 )
 train_corpus = split["train"]
