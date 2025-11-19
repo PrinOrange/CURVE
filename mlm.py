@@ -15,7 +15,7 @@ from transformers import (
 # 配置
 # -----------------------------
 RANDOM_SEED = 42
-EPOCHS = 10
+EPOCHS = 1
 BATCH_SIZE = 64
 
 CHECK_STEPS = 2000
@@ -28,6 +28,7 @@ HF_DATASET_SPLIT = "train"
 HF_MODEL_PATH = "microsoft/graphcodebert-base"
 TESTSET_SIZE = 0.05
 
+MLM_PROBABILITY = 0.15
 MAX_TOKEN_LENGTH = 512
 
 OUTPUT_DIR = "./out"
@@ -47,7 +48,9 @@ raw_corpus = load_dataset(
 # -----------------------------
 # 划分 train / eval
 # -----------------------------
-split = raw_corpus.train_test_split(test_size=TESTSET_SIZE, seed=RANDOM_SEED)  # 通常 1%～5% 都够用
+split = raw_corpus.train_test_split(
+    test_size=TESTSET_SIZE, seed=RANDOM_SEED
+)  # 通常 1%～5% 都够用
 train_corpus = split["train"]
 eval_corpus = split["test"]
 
@@ -58,6 +61,7 @@ print("Eval size:", len(eval_corpus))
 # 初始化 tokenizer
 # -----------------------------
 tokenizer = RobertaTokenizer.from_pretrained(MODELS_DIR)
+
 
 # -----------------------------
 # Tokenization
@@ -84,7 +88,7 @@ tokenized_eval = eval_corpus.map(
 data_collator = DataCollatorForLanguageModeling(
     tokenizer=tokenizer,
     mlm=True,
-    mlm_probability=0.15,
+    mlm_probability=MLM_PROBABILITY,
 )
 
 # -----------------------------
