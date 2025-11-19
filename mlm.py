@@ -105,7 +105,7 @@ training_args = TrainingArguments(
 
     # ==== 评估 ====
     eval_strategy="steps",
-    eval_steps=5,                  # 每 2000 steps 评估一次
+    eval_steps=2000,                  # 每 2000 steps 评估一次
     load_best_model_at_end=True,      # 自动加载最佳 checkpoint
     metric_for_best_model="loss",     # 使用 eval_loss 选择最佳模型
     greater_is_better=False,          # loss 越低越好
