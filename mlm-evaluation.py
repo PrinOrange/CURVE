@@ -133,7 +133,7 @@ masked_acc = masked_correct / total_masked_tokens
 top5_acc = top5_correct / total_masked_tokens
 top10_acc = top10_correct / total_masked_tokens
 
-print(f"MLM Test Loss            = {avg_loss:.4f}")
+print(f"MLM Test Loss           = {avg_loss:.4f}")
 print(f"Perplexity              = {perplexity:.4f}")
 print(f"Masked Token Accuracy   = {masked_acc:.4%}")
 print(f"Top-5 Accuracy          = {top5_acc:.4%}")
@@ -169,6 +169,6 @@ except FileNotFoundError:
 data.append(result)
 
 with open(json_file, "w") as f:
-    json.dump(data, f, indent=4)
+    json.dump(data, f, indent=2)
 
 print(f"\n实验结果已写入 {json_file}")
