@@ -12,17 +12,21 @@ import torch.nn.functional as F
 # Note: use <mask> to replace the masked tokens
 # -----------------------------
 CODE_TO_TEST = """
-FILE* openFile(<mask> flag) {
-    FILE* f = fopen("data.txt", "r");
-    if (flag) return nullptr;
-    return f;
+int parseHeader(const std::vector<int>& header, int index) {
+    int size = header.size();
+    int len = header[0];
+    if (len > size) {
+        return -1;
+    }
+    int pos = index + len;          
+    return header[pos];
 }
 """
 
 # -----------------------------
 # Configuration
 # -----------------------------
-MODEL_DIR = "/home/malaoshi/bak/checkpoint-20000"
+MODEL_DIR = "/home/malaoshi/bak/checkpoint-32000"
 TOP_K_TO_PREDICT = 5
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", DEVICE)
