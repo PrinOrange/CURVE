@@ -16,7 +16,7 @@ int parseHeader(const std::vector<int>& header, int index) {
     int size = header.size();
     int len = header[0];
     if (len > size) {
-        return -1;
+        <mask> -1;
     }
     int pos = index + len;          
     return header[pos];
@@ -26,19 +26,21 @@ int parseHeader(const std::vector<int>& header, int index) {
 # -----------------------------
 # Configuration
 # -----------------------------
-MODEL_DIR = "/home/malaoshi/bak/checkpoint-32000"
+HF_MODEL_PATH = "/home/malaoshi/bak/checkpoint-40000"
 TOP_K_TO_PREDICT = 5
+MASK_TOKEN = '<mask>'
+
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", DEVICE)
 
 # -----------------------------
 # Load model and tokenizer
 # -----------------------------
-tokenizer = RobertaTokenizer.from_pretrained(MODEL_DIR)
-model = RobertaForMaskedLM.from_pretrained(MODEL_DIR).to(DEVICE)
+tokenizer = RobertaTokenizer.from_pretrained(HF_MODEL_PATH)
+model = RobertaForMaskedLM.from_pretrained(HF_MODEL_PATH).to(DEVICE)
 model.eval()
 
-masked_text = CODE_TO_TEST.replace("<mask>", tokenizer.mask_token)
+masked_text = CODE_TO_TEST.replace(MASK_TOKEN, tokenizer.mask_token)
 inputs = tokenizer(masked_text, return_tensors="pt")
 input_ids = inputs["input_ids"].to(DEVICE)
 
