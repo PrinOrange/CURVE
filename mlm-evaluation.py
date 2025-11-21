@@ -11,7 +11,7 @@ from datetime import datetime
 # ----------------------------
 # 配置
 # ----------------------------
-HF_MODEL_PATH = "/home/malaoshi/bak/checkpoint-42000"
+HF_MODEL_PATH = "/home/malaoshi/bak/checkpoint-78000"
 HF_DATASET_PATH = "codemetic/curve"
 HF_DATASET_SUBSET = "pretrain"
 HF_DATASET_SPILT = "train"
@@ -40,13 +40,13 @@ raw_ds = load_dataset(HF_DATASET_PATH, HF_DATASET_SUBSET, split=HF_DATASET_SPILT
 # -----------------------------
 def preprocess(examples):
     return tokenizer(
-        examples["text"],
+        examples["source"],
         truncation=True,
         max_length=MAX_TOKEN_LENGTH,
     )
 
 
-tokenized_ds = raw_ds.map(preprocess, batched=True, remove_columns=["text"])
+tokenized_ds = raw_ds.map(preprocess, batched=True, remove_columns=["id","source"])
 
 # ----------------------------
 # MLM 数据增强（随机 mask）

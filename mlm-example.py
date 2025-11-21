@@ -12,21 +12,21 @@ import torch.nn.functional as F
 # Note: use <mask> to replace the masked tokens
 # -----------------------------
 CODE_TO_TEST = """
-int parseHeader(const std::vector<int>& header, int index) {
-    int size = header.size();
-    int len = header[0];
-    if (len > size) {
-        <mask> -1;
+<mask> basicMemoryLeak() {
+    int* data = new int[100];
+    for (<mask> i = 0; i < 100; ++i) {
+        data[i] = i * i;
     }
-    int pos = index + len;          
-    return header[pos];
+    
+    std::cout << "OK" << std::endl;
+    delete[] data
 }
 """
 
 # -----------------------------
 # Configuration
 # -----------------------------
-HF_MODEL_PATH = "/home/malaoshi/bak/checkpoint-40000"
+HF_MODEL_PATH = "/home/malaoshi/bak/checkpoint-66000"
 TOP_K_TO_PREDICT = 5
 MASK_TOKEN = '<mask>'
 
