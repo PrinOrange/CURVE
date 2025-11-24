@@ -21,10 +21,6 @@ class CweBertTokenizer:
             spelling = t.spelling.strip()
             if spelling == "":
                 continue
-            ## Keyword no need
-            ## Punctuations no need
-            ## Literal all to BPE
-            # spelling = spelling.replace(' ', '')
             tokens.append(NormalizedString(spelling))
         return tokens
 

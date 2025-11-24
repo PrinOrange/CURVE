@@ -14,13 +14,10 @@ class SoftLabelLoss(nn.Module):
         teacher_logits: [B, C]
         """
         T = self.T
-
         # 1. 学生分布（log_softmax）
         student_log_prob = F.log_softmax(student_logits / T, dim=-1)
-
         # 2. 教师分布（softmax）
         teacher_prob = F.softmax(teacher_logits / T, dim=-1)
-
         # 3. KL(student || teacher)
         loss = self.kl(student_log_prob, teacher_prob) * (T * T)
 
