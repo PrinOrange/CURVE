@@ -1,8 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import RobertaModel
-
 
 # SupCon 损失函数
 class SupConLoss(nn.Module):
@@ -43,20 +41,3 @@ class SupConLoss(nn.Module):
         # loss
         loss = -mean_log_prob_pos.mean()
         return loss
-
-
-class RobertaSupCon(nn.Module):
-    def __init__(self, model_name):
-        super().__init__()
-        self.encoder = RobertaModel.from_pretrained(model_name)
-        self.projector = nn.Sequential(
-            nn.Linear(768, 768),
-            nn.ReLU(),
-            nn.Linear(768, 128),
-        )
-
-    def forward(self, input_ids, attention_mask):
-        out = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
-        cls = out.last_hidden_state[:, 0]  # CLS embedding
-        z = self.projector(cls)
-        return z

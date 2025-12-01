@@ -1,54 +1,35 @@
-import torch
+from transformers import RobertaModel
 import torch.nn as nn
-from transformers import RobertaConfig, RobertaModel, RobertaPreTrainedModel
 
-class RobertaForSequenceClassification(RobertaPreTrainedModel):
-    def __init__(self, config: RobertaConfig):
-        super().__init__(config)
-        self.num_labels = config.num_labels  # 多分类时用
-        self.roberta = RobertaModel(config)
-        hidden_size = config.hidden_size
-
-        # ------- Attention Pooling -------
-        self.attention = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size), nn.Tanh(), nn.Linear(hidden_size, 1)
+class CweBERT(nn.Module):
+    """
+    RoBERTa-Based 模型，作为特征提取器和分类器头。
+    """
+    def __init__(self, model_name, num_cwe):
+        super().__init__()
+        # 特征提取器 E(X)
+        self.encoder = RobertaModel.from_pretrained(model_name)
+        # 降维投影头 (可选，用于对比学习)
+        self.proj_head = nn.Sequential(
+            nn.Linear(self.encoder.config.hidden_size, self.encoder.config.hidden_size),
+            nn.ReLU(),
+            nn.Linear(self.encoder.config.hidden_size, 128) # 128是对比学习的嵌入维度
         )
+        # CWE 分类头 (用于硬/软标签损失)
+        self.classifier = nn.Linear(self.encoder.config.hidden_size, num_cwe)
 
-        # -------- Classifier ---------
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.classifier = nn.Linear(hidden_size, config.num_labels)
+    def forward(self, input_ids, attention_mask):
+        # 获取 [CLS] token 的表示 R
+        outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
+        cls_token = outputs.last_hidden_state[:, 0, :]
+        
+        # 1. 嵌入表示 Z (用于 SupCon 损失)
+        z = self.proj_head(cls_token)
+        
+        # 2. Logits (用于硬/软标签损失)
+        logits = self.classifier(cls_token)
+        
+        # 3. 内部特征 R_int (用于 L_int 损失)
+        r_int = cls_token # 使用 cls_token 作为内部表示
 
-        # init weights
-        self.post_init()
-
-    def forward(self, input_ids=None, attention_mask=None, labels=None, **kwargs):
-        outputs = self.roberta(
-            input_ids=input_ids, attention_mask=attention_mask, **kwargs
-        )
-
-        last_hidden_state = outputs.last_hidden_state  # (B, L, H)
-
-        # attention pooling
-        attn_scores = self.attention(last_hidden_state)  # (B, L, 1)
-        attn_scores = attn_scores.masked_fill(
-            attention_mask.unsqueeze(-1) == 0, float("-inf")
-        )
-        attn_weights = torch.softmax(attn_scores, dim=1)
-        pooled_output = torch.sum(attn_weights * last_hidden_state, dim=1)
-
-        # classifier
-        logits = self.classifier(self.dropout(pooled_output))
-
-        loss = None
-        if labels is not None:
-            if self.num_labels == 1:  # binary regression-like
-                loss_fct = nn.BCEWithLogitsLoss()
-                loss = loss_fct(logits.view(-1), labels.float())
-            else:
-                loss_fct = nn.CrossEntropyLoss()
-                loss = loss_fct(logits.view(-1, self.num_labels), labels)
-
-        return {
-            "loss": loss,
-            "logits": logits,
-        }
+        return z, logits, r_int
