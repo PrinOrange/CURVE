@@ -48,11 +48,11 @@ MAX_EPOCHS = 200
 EARLY_STOPPING_PATIENCE = 5
 
 # KappaFace Hyperparameters
-GAMMA = 0.7  # balance between difficulty and imbalance
+GAMMA = 0.9  # balance between difficulty and imbalance
 TEMPERATURE_T = 0.4  # temperature for difficulty weight
 M0 = 0.8  # base margin
 S = 30.0  # scale factor
-LAMBDA_PROTO = 0.5  # weight for prototype loss
+LAMBDA_PROTO = 0.8  # weight for prototype loss
 
 # Memory Buffer vs Momentum Encoder
 USE_MOMENTUM_ENCODER = (
