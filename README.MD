@@ -32,15 +32,11 @@ conda activate curve
 
 ## 训练
 
-![](./Assets/fig2.svg)
-
 首先，进行预分词训练，生成词表文件。
 
 ```bash
 python pretokenize.py
 ```
-
-![](./Assets/fig1.svg)
 
 然后再进行 MLM 训练，得到预训练后的 CweBERT.
 
