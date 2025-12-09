@@ -1,35 +1,28 @@
-# -*- coding: utf-8 -*-
-"""
-Vulnerability Detection with KappaFace + Prototype Loss
-Using codemetic/CweBERT-mlm as RoBERTa backbone
-"""
-
-import os
 import json
 import math
+import os
+import warnings
+from collections import Counter
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
-from transformers import RobertaModel, RobertaTokenizer, RobertaConfig
 from datasets import load_dataset
-import numpy as np
-from tqdm import tqdm
+from sklearn.cluster import KMeans
 from sklearn.metrics import (
-    precision_recall_fscore_support,
     accuracy_score,
     confusion_matrix,
     matthews_corrcoef,
     normalized_mutual_info_score,
+    precision_recall_fscore_support,
 )
-from sklearn.cluster import KMeans
+from sklearn.model_selection import StratifiedShuffleSplit
+from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
+from transformers import RobertaConfig, RobertaModel, RobertaTokenizer
 from umap import UMAP
-import matplotlib.pyplot as plt
-import seaborn as sns
-from collections import defaultdict, Counter
-import argparse
-from typing import Dict, List, Tuple, Optional
-import warnings
 
 warnings.filterwarnings("ignore")
 
@@ -64,6 +57,9 @@ MOMENTUM = 0.999  # momentum encoder coefficient
 # Device
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # torch.set_default_device(DEVICE)
+
+# Image settings
+UMAP_MAX_POINTS = 1500
 
 # Output directory
 OUTPUT_DIR = f"output_{SUBSET_NAME}"
@@ -344,7 +340,7 @@ class Trainer:
     def _update_memory_buffer(self, buffer, labels, dataloader, idx_map):
         """Update memory buffer with EMA"""
         current_idx = 0
-        for batch in dataloader:
+        for batch in tqdm(dataloader, desc="Updating memory buffer"):
             with torch.no_grad():
                 features = self.model.encoder(
                     batch["input_ids"].to(DEVICE), batch["attention_mask"].to(DEVICE)
@@ -428,9 +424,13 @@ class Trainer:
 
         # Compute clustering metrics
         ch_score = compute_ch_score(all_embeddings_np, all_labels_np)
-        nmi_score = normalized_mutual_info_score(
-            all_labels_np, all_labels_np
-        )  # Perfect
+
+        if len(np.unique(all_labels_np)) > 1:
+            kmeans = KMeans(n_clusters=len(np.unique(all_labels_np)), random_state=42)
+            cluster_labels = kmeans.fit_predict(all_embeddings_np)
+            nmi_score = normalized_mutual_info_score(all_labels_np, cluster_labels)
+        else:
+            nmi_score = 0.0  # or np.nan, but 0 is safer for logging
 
         # Plot UMAP
         self._plot_umap(all_embeddings_np, all_class_keys, split_name, epoch)
@@ -438,46 +438,87 @@ class Trainer:
         return ch_score, nmi_score
 
     def _plot_umap(self, embeddings, class_keys, split_name, epoch):
-        reducer = UMAP(n_components=2, random_state=42)
-        umap_embeddings = reducer.fit_transform(embeddings)
 
-        cwes = [ck[1] for ck in class_keys]
-        labels = [ck[0] for ck in class_keys]
+        # ------------------------------------------
+        # 1. 使用 scikit-learn 进行分层抽样
+        # ------------------------------------------
+        total_samples = len(class_keys)
+
+        # 构造分层标签：把 (cwe, label) 作为一个分层类别
+        stratify_labels = np.array([f"{ck[1]}_{ck[0]}" for ck in class_keys])
+
+        # 需要抽取的比例
+        if total_samples > UMAP_MAX_POINTS:
+            split = StratifiedShuffleSplit(
+                n_splits=1, train_size=UMAP_MAX_POINTS, random_state=42
+            )
+            sampled_idx, _ = next(split.split(np.zeros(total_samples), stratify_labels))
+        else:
+            sampled_idx = np.arange(total_samples)
+
+        # 子集化数据
+        sampled_embeddings = embeddings[sampled_idx]
+        sampled_class_keys = [class_keys[i] for i in sampled_idx]
+
+        # ------------------------------------------
+        # 2. 计算 UMAP
+        # ------------------------------------------
+        reducer = UMAP(n_components=2, random_state=42)
+        umap_embeddings = reducer.fit_transform(sampled_embeddings)
+
+        cwes = [ck[1] for ck in sampled_class_keys]
+        labels = [ck[0] for ck in sampled_class_keys]
 
         cwe_unique = sorted(set(cwes))
         cwe_to_color = {cwe: i for i, cwe in enumerate(cwe_unique)}
         colors = [cwe_to_color[cwe] for cwe in cwes]
         markers = ["o" if label else "x" for label in labels]
 
+        # 颜色映射（无限颜色，避免 tab20 限制）
+        cmap = plt.colormaps.get_cmap("gist_ncar")
+
         plt.figure(figsize=(12, 8))
 
-        # Plot real points
+        # ------------------------------------------
+        # 3. 绘制散点图
+        # ------------------------------------------
         for i in range(len(umap_embeddings)):
             x, y = umap_embeddings[i]
-            color_val = colors[i] % 20  # tab20 has 20 colors
+
+            # 使用连续 colormap，根据 CWE index 映射颜色
+            color_val = cmap(colors[i] / max(len(cwe_unique) - 1, 1))
+
             plt.scatter(
                 x,
                 y,
-                c=[plt.cm.tab20(color_val)],
+                c=[color_val],
                 marker=markers[i],
                 s=20,
                 edgecolors="none",
             )
 
-        # === Legend: CWE types (colors) ===
+        # ------------------------------------------
+        # 4. 图例
+        # ------------------------------------------
         for cwe in cwe_unique:
-            color_idx = cwe_to_color[cwe] % 20
+            color_idx = cwe_to_color[cwe]
             plt.plot(
-                [], [], "o", color=plt.cm.tab20(color_idx), label=cwe, markersize=5
+                [],
+                [],
+                "o",
+                color=cmap(color_idx / max(len(cwe_unique) - 1, 1)),
+                label=cwe,
+                markersize=5,
             )
 
-        # === Legend: Vulnerable vs Non-vulnerable (markers) ===
+        # Vulnerable vs Non-vulnerable legends
         plt.plot([], [], "o", color="black", label="Vulnerable", markersize=5)
         plt.plot([], [], "x", color="black", label="Non-vulnerable", markersize=5)
 
         plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
         plt.title(f"UMAP Projection - {split_name} (Epoch {epoch})")
         plt.tight_layout()
+
         plt.savefig(os.path.join(OUTPUT_DIR, f"umap_{split_name}_epoch_{epoch}.svg"))
         plt.close()
 
@@ -706,7 +747,9 @@ class Trainer:
 
             # Evaluate on validation set
             ch_score, nmi_score = self._evaluate_epoch(val_loader, "val", epoch + 1)
-            print(f"Val CH: {ch_score:.4f}, NMI: {nmi_score:.4f}")
+            print(
+                f"Val CH: {ch_score:.4f}, NMI: {nmi_score:.4f}, Avg Loss: {avg_loss:.4f}, Loss Kappa: {loss_kappa.item():.4f}, Loss Proto: {loss_proto.item():.4f}"
+            )
 
             # Early stopping
             if avg_loss < self.best_val_loss:
@@ -776,6 +819,22 @@ class Trainer:
 # Main Execution
 # ========================
 def main():
+
+    print("Start training...")
+    print("Trainning Arguments:")
+    print(f"Dataset: {DATASET_NAME} - {SUBSET_NAME}")
+    print(f"Model: {MODEL_NAME}")
+    print(f"Batch Size: {BATCH_SIZE}")
+    print(f"Learning Rate: {LEARNING_RATE}, Weight Decay: {WEIGHT_DECAY}")
+    print(f"Max Epochs: {MAX_EPOCHS}")
+    print(f"Device: {DEVICE}")
+    print(f"Gamma: {GAMMA}, Temperature T: {TEMPERATURE_T}, M0: {M0}, S: {S}")
+    print(f"Alpha: {ALPHA}, Momentum: {MOMENTUM}")
+    print(f"Prototype Loss Weight: {LAMBDA_PROTO}")
+    print(f"Using Momentum Encoder: {USE_MOMENTUM_ENCODER}")
+    print(f"Output Directory: {OUTPUT_DIR}")
+    print("======================================================")
+
     # Load dataset
     dataset = load_dataset(DATASET_NAME, SUBSET_NAME)
     train_data = dataset["train"]
