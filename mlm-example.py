@@ -26,7 +26,7 @@ CODE_TO_TEST = """
 # -----------------------------
 # Configuration
 # -----------------------------
-HF_MODEL_PATH = "/home/malaoshi/bak/checkpoint-66000"
+HF_MODEL_PATH = "codemetic/CweBERT-mlm"
 TOP_K_TO_PREDICT = 5
 MASK_TOKEN = '<mask>'
 

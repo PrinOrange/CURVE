@@ -23,6 +23,8 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from transformers import RobertaConfig, RobertaModel, RobertaTokenizer
 from umap import UMAP
+import random
+import time
 
 warnings.filterwarnings("ignore")
 
@@ -34,11 +36,12 @@ DATASET_NAME = "codemetic/curve"
 MODEL_NAME = "codemetic/CweBERT-mlm"
 
 MAX_LENGTH = 512
-BATCH_SIZE = 16
+BATCH_SIZE = 128
 LEARNING_RATE = 2e-5
 WEIGHT_DECAY = 0.01
-MAX_EPOCHS = 200
-EARLY_STOPPING_PATIENCE = 5
+MAX_EPOCHS = 500
+EARLY_STOPPING_PATIENCE = 50
+RANDOM_SEED = 42
 
 # KappaFace Hyperparameters
 GAMMA = 0.9  # balance between difficulty and imbalance
@@ -62,13 +65,28 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 UMAP_MAX_POINTS = 1500
 
 # Output directory
-OUTPUT_DIR = f"output_{SUBSET_NAME}"
+OUTPUT_DIR = f"output_{SUBSET_NAME}_{time.strftime('%Y%m%d-%H%M%S')}"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
 # ========================
 # Utility Functions
 # ========================
+
+
+def set_seed():
+    """
+    设置统一的随机种子，确保实验可复现。
+    """
+    random.seed(RANDOM_SEED)
+    np.random.seed(RANDOM_SEED)
+    torch.manual_seed(RANDOM_SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(RANDOM_SEED)
+        torch.cuda.manual_seed_all(RANDOM_SEED)  # 如果使用多 GPU
+        # 确保每次运行算法选择一致（但会降低性能）
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 
 def custom_collate_fn(batch):
@@ -302,6 +320,10 @@ class Trainer:
         self.class_counts = self._count_classes(train_dataset)
         self.max_count = max(self.class_counts.values())
 
+        # Build sample index to buffer row mapping (identity due to shuffle=False)
+        self.sample_to_buffer_idx = {i: i for i in range(len(train_dataset))}
+        self.total_train_samples = len(train_dataset)
+
     def _count_classes(self, dataset):
         counts = Counter()
         for item in dataset.data:
@@ -336,22 +358,6 @@ class Trainer:
                     )
                 current_idx += batch_size
         return buffer, labels, idx_map
-
-    def _update_memory_buffer(self, buffer, labels, dataloader, idx_map):
-        """Update memory buffer with EMA"""
-        current_idx = 0
-        for batch in tqdm(dataloader, desc="Updating memory buffer"):
-            with torch.no_grad():
-                features = self.model.encoder(
-                    batch["input_ids"].to(DEVICE), batch["attention_mask"].to(DEVICE)
-                )
-                features_norm = l2_norm(features)
-                batch_size = features_norm.size(0)
-                old_features = buffer[current_idx : current_idx + batch_size]
-                buffer[current_idx : current_idx + batch_size] = (
-                    ALPHA * old_features + (1 - ALPHA) * features_norm
-                )
-                current_idx += batch_size
 
     def _compute_dynamic_margins(self, embeddings_or_buffer, labels):
         """Compute dynamic margins for all classes"""
@@ -435,9 +441,23 @@ class Trainer:
         # Plot UMAP
         self._plot_umap(all_embeddings_np, all_class_keys, split_name, epoch)
 
+        all_embeddings_gpu = all_embeddings.to(DEVICE)
+        all_labels_tensor = torch.tensor(all_labels, device=DEVICE)
+        prototypes = self._compute_prototypes(all_embeddings_gpu, all_labels_tensor)
+
+        # 构造 class labels（字符串形式，用于 heatmap 显示）
+        unique_labels = sorted(set(all_labels))
+        class_labels = [
+            f"{self.idx_to_class[idx][1]}_{self.idx_to_class[idx][0]}"
+            for idx in unique_labels
+        ]
+
+        # 绘制热力图
+        self._plot_prototype_heatmap(prototypes, class_labels, split_name, epoch)
+
         return ch_score, nmi_score
 
-    def _plot_umap(self, embeddings, class_keys, split_name, epoch):
+    def _plot_umap(self, embeddings, class_keys, split_name, epoch=None):
 
         # ------------------------------------------
         # 1. 使用 scikit-learn 进行分层抽样
@@ -516,13 +536,16 @@ class Trainer:
         plt.plot([], [], "x", color="black", label="Non-vulnerable", markersize=5)
 
         plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
-        plt.title(f"UMAP Projection - {split_name} (Epoch {epoch})")
         plt.tight_layout()
-
-        plt.savefig(os.path.join(OUTPUT_DIR, f"umap_{split_name}_epoch_{epoch}.svg"))
+        if epoch is None:
+            plt.title(f"UMAP Projection - {split_name}")
+            plt.savefig(os.path.join(OUTPUT_DIR, f"umap_{split_name}.svg"))
+        else:
+            plt.title(f"UMAP Projection - {split_name} (Epoch {epoch})")
+            plt.savefig(os.path.join(OUTPUT_DIR, f"umap_{split_name}_epoch_{epoch}.svg"))
         plt.close()
 
-    def _plot_prototype_heatmap(self, prototypes, class_labels, split_name, epoch):
+    def _plot_prototype_heatmap(self, prototypes, class_labels, split_name, epoch=None):
         sim_matrix = torch.mm(prototypes, prototypes.t()).cpu().numpy()
         plt.figure(figsize=(10, 8))
         sns.heatmap(
@@ -531,12 +554,20 @@ class Trainer:
             yticklabels=class_labels,
             cmap="viridis",
         )
+        plt.tight_layout()
         plt.title(f"Prototype Similarity Heatmap - {split_name}")
-        plt.savefig(
-            os.path.join(
-                OUTPUT_DIR, f"prototype_heatmap_{split_name}_epoch_{epoch}.svg"
+        if epoch is None:
+            plt.savefig(
+                os.path.join(
+                    OUTPUT_DIR, f"prototype_heatmap_{split_name}.svg"
+                )
             )
-        )
+        else:
+            plt.savefig(
+                os.path.join(
+                    OUTPUT_DIR, f"prototype_heatmap_{split_name}_epoch_{epoch}.svg"
+                )
+            )
         plt.close()
 
     def _compute_thresholds(self, train_embeddings, train_labels):
@@ -581,6 +612,8 @@ class Trainer:
         all_true_labels = []
         all_true_class_keys = []
         all_pred_class_indices = []
+        all_labels = []
+        all_class_keys = []
 
         with torch.no_grad():
             for batch in tqdm(dataloader, desc=f"Final {split_name} evaluation"):
@@ -589,6 +622,8 @@ class Trainer:
                 )
                 all_embeddings.append(embeddings)
                 all_true_labels.extend(batch["label"])
+                label_indices = [self.class_to_idx[k] for k in batch["class_key"]]
+                all_labels.extend(label_indices)
                 all_true_class_keys.extend(batch["class_key"])
 
         all_embeddings = torch.cat(all_embeddings, dim=0)
@@ -632,6 +667,26 @@ class Trainer:
         tnr = tn / (tn + fp) if (tn + fp) > 0 else 0
         mcc = matthews_corrcoef(y_true_binary, y_pred_binary)
 
+        all_embeddings_np = all_embeddings.numpy()
+        all_labels_np = np.array(all_labels)
+
+        # Plot UMAP
+        self._plot_umap(all_embeddings_np, all_class_keys, split_name)
+
+        all_embeddings_gpu = all_embeddings.to(DEVICE)
+        all_labels_tensor = torch.tensor(all_labels, device=DEVICE)
+        prototypes = self._compute_prototypes(all_embeddings_gpu, all_labels_tensor)
+
+        # 构造 class labels（字符串形式，用于 heatmap 显示）
+        unique_labels = sorted(set(all_labels))
+        class_labels = [
+            f"{self.idx_to_class[idx][1]}_{self.idx_to_class[idx][0]}"
+            for idx in unique_labels
+        ]
+
+        # 绘制热力图
+        self._plot_prototype_heatmap(prototypes, class_labels, split_name)
+
         metrics = {
             "accuracy": float(acc),
             "precision": float(precision),
@@ -655,7 +710,7 @@ class Trainer:
         train_loader = DataLoader(
             self.train_dataset,
             batch_size=BATCH_SIZE,
-            shuffle=True,
+            shuffle=False,
             collate_fn=custom_collate_fn,
         )
         val_loader = DataLoader(
@@ -698,16 +753,15 @@ class Trainer:
                     momentum_embeddings, momentum_labels
                 )
             else:
-                # Update memory buffer
-                self._update_memory_buffer(
-                    self.memory_buffer, self.memory_labels, train_loader, None
-                )
+                # <<< REMOVED _update_memory_buffer CALL HERE >>>
+                # Memory buffer is updated in the training loop per batch
                 margins = self._compute_dynamic_margins(
                     self.memory_buffer, self.memory_labels
                 )
 
             total_loss = 0.0
             progress_bar = tqdm(train_loader, desc="Training")
+            sample_offset = 0  # Track current position in memory buffer
             for batch in progress_bar:
                 self.optimizer.zero_grad()
 
@@ -730,6 +784,19 @@ class Trainer:
                 loss.backward()
                 self.optimizer.step()
 
+                # ============ UPDATE MEMORY BUFFER PER BATCH ============
+                if not USE_MOMENTUM_ENCODER:
+                    batch_size = features_norm.size(0)
+                    start_idx = sample_offset
+                    end_idx = start_idx + batch_size
+                    with torch.no_grad():
+                        self.memory_buffer[start_idx:end_idx] = (
+                            ALPHA * self.memory_buffer[start_idx:end_idx]
+                            + (1 - ALPHA) * features_norm
+                        )
+                    sample_offset += batch_size
+                # ========================================================
+
                 if USE_MOMENTUM_ENCODER:
                     # Update momentum encoder
                     with torch.no_grad():
@@ -748,7 +815,9 @@ class Trainer:
             # Evaluate on validation set
             ch_score, nmi_score = self._evaluate_epoch(val_loader, "val", epoch + 1)
             print(
-                f"Val CH: {ch_score:.4f}, NMI: {nmi_score:.4f}, Avg Loss: {avg_loss:.4f}, Loss Kappa: {loss_kappa.item():.4f}, Loss Proto: {loss_proto.item():.4f}"
+                f"""Val CH: {ch_score:.4f}, NMI: {nmi_score:.4f}, 
+                Avg Loss: {avg_loss:.4f}, History Best Loss: ${self.best_val_loss:.4f}
+                Loss Kappa: {loss_kappa.item():.4f}, Loss Proto: {loss_proto.item():.4f}"""
             )
 
             # Early stopping
@@ -820,11 +889,13 @@ class Trainer:
 # ========================
 def main():
 
+    set_seed()
+
     print("Start training...")
     print("Trainning Arguments:")
     print(f"Dataset: {DATASET_NAME} - {SUBSET_NAME}")
     print(f"Model: {MODEL_NAME}")
-    print(f"Batch Size: {BATCH_SIZE}")
+    print(f"Batch Size: {BATCH_SIZE}, Random Seed: {RANDOM_SEED}")
     print(f"Learning Rate: {LEARNING_RATE}, Weight Decay: {WEIGHT_DECAY}")
     print(f"Max Epochs: {MAX_EPOCHS}")
     print(f"Device: {DEVICE}")
