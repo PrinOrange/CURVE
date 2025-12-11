@@ -25,22 +25,29 @@ from transformers import RobertaConfig, RobertaModel, RobertaTokenizer
 from umap import UMAP
 import random
 import time
+import seaborn as sns
 
 warnings.filterwarnings("ignore")
 
 # ========================
 # Configuration Constants
 # ========================
+
+# bigvul,diversevul,vuldeepecker,primevul,primevul-paired,megavul,reposvul
 SUBSET_NAME = "primevul-paired"
 DATASET_NAME = "codemetic/curve"
 MODEL_NAME = "codemetic/CweBERT-mlm"
 
-MAX_LENGTH = 512
-BATCH_SIZE = 128
+# Layers: 0 1 2 3 4 5 6 7 8 9 10 11
+# The outer layer has more code structure features while the inner layer has more semantic features.
+ROBERTA_LAYERS_TO_CONCAT = (6, 7, 8, 9)
+
+MAX_LENGTH = 152
+BATCH_SIZE = 64
 LEARNING_RATE = 2e-5
 WEIGHT_DECAY = 0.01
-MAX_EPOCHS = 500
-EARLY_STOPPING_PATIENCE = 50
+MAX_EPOCHS = 1800
+EARLY_STOPPING_PATIENCE = int(MAX_EPOCHS * 0.1)
 RANDOM_SEED = 42
 
 # KappaFace Hyperparameters
@@ -62,7 +69,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # torch.set_default_device(DEVICE)
 
 # Image settings
-UMAP_MAX_POINTS = 1500
+UMAP_MAX_POINTS = 10000
 
 # Output directory
 OUTPUT_DIR = f"output_{SUBSET_NAME}_{time.strftime('%Y%m%d-%H%M%S')}"
@@ -75,16 +82,12 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
 def set_seed():
-    """
-    设置统一的随机种子，确保实验可复现。
-    """
     random.seed(RANDOM_SEED)
     np.random.seed(RANDOM_SEED)
     torch.manual_seed(RANDOM_SEED)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(RANDOM_SEED)
-        torch.cuda.manual_seed_all(RANDOM_SEED)  # 如果使用多 GPU
-        # 确保每次运行算法选择一致（但会降低性能）
+        torch.cuda.manual_seed_all(RANDOM_SEED)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
@@ -180,7 +183,7 @@ class VulnerabilityDataset(Dataset):
 # Model Definition
 # ========================
 class RoBERTaEncoder(nn.Module):
-    def __init__(self, model_name, layers_to_concat=(6, 7, 8, 9)):
+    def __init__(self, model_name, layers_to_concat=ROBERTA_LAYERS_TO_CONCAT):
         super().__init__()
         self.config = RobertaConfig.from_pretrained(
             model_name, output_hidden_states=True
@@ -313,7 +316,7 @@ class Trainer:
         )
 
         self.best_val_loss = float("inf")
-        self.epochs_no_improve = 0
+        self.patience_counter = 0
         self.global_step = 0
 
         # For dynamic margin
@@ -458,16 +461,12 @@ class Trainer:
         return ch_score, nmi_score
 
     def _plot_umap(self, embeddings, class_keys, split_name, epoch=None):
-
         # ------------------------------------------
-        # 1. 使用 scikit-learn 进行分层抽样
+        # 1. 分层抽样
         # ------------------------------------------
         total_samples = len(class_keys)
-
-        # 构造分层标签：把 (cwe, label) 作为一个分层类别
         stratify_labels = np.array([f"{ck[1]}_{ck[0]}" for ck in class_keys])
 
-        # 需要抽取的比例
         if total_samples > UMAP_MAX_POINTS:
             split = StratifiedShuffleSplit(
                 n_splits=1, train_size=UMAP_MAX_POINTS, random_state=42
@@ -476,98 +475,126 @@ class Trainer:
         else:
             sampled_idx = np.arange(total_samples)
 
-        # 子集化数据
         sampled_embeddings = embeddings[sampled_idx]
         sampled_class_keys = [class_keys[i] for i in sampled_idx]
 
         # ------------------------------------------
-        # 2. 计算 UMAP
+        # 2. UMAP 降维
         # ------------------------------------------
         reducer = UMAP(n_components=2, random_state=42)
         umap_embeddings = reducer.fit_transform(sampled_embeddings)
 
-        cwes = [ck[1] for ck in sampled_class_keys]
-        labels = [ck[0] for ck in sampled_class_keys]
-
-        cwe_unique = sorted(set(cwes))
-        cwe_to_color = {cwe: i for i, cwe in enumerate(cwe_unique)}
-        colors = [cwe_to_color[cwe] for cwe in cwes]
-        markers = ["o" if label else "x" for label in labels]
-
-        # 颜色映射（无限颜色，避免 tab20 限制）
-        cmap = plt.colormaps.get_cmap("gist_ncar")
-
-        plt.figure(figsize=(12, 8))
+        labels = np.array([ck[0] for ck in sampled_class_keys])  # bool array
+        cwes = np.array([ck[1] for ck in sampled_class_keys])
 
         # ------------------------------------------
-        # 3. 绘制散点图
+        # 3. 颜色映射（仅漏洞样本按 CWE 上色）
         # ------------------------------------------
-        for i in range(len(umap_embeddings)):
-            x, y = umap_embeddings[i]
+        vuln_mask = labels.astype(bool)
+        vulnerable_cwes = cwes[vuln_mask]
+        cwe_unique_vuln = sorted(set(vulnerable_cwes))
 
-            # 使用连续 colormap，根据 CWE index 映射颜色
-            color_val = cmap(colors[i] / max(len(cwe_unique) - 1, 1))
+        if cwe_unique_vuln:
+            palette = sns.color_palette("husl", n_colors=len(cwe_unique_vuln))
+            cwe_to_color = {cwe: palette[i] for i, cwe in enumerate(cwe_unique_vuln)}
+        else:
+            cwe_to_color = {}
 
+        # ------------------------------------------
+        # 4. 自适应 figsize
+        # ------------------------------------------
+        num_legend_items = len(cwe_unique_vuln) + 1  # +1 for "Non-vulnerable"
+        fig_width = max(10, 8 + 0.4 * num_legend_items)
+        fig_height = 8
+        plt.figure(figsize=(fig_width, fig_height))
+
+        x = umap_embeddings[:, 0]
+        y = umap_embeddings[:, 1]
+
+        # ------------------------------------------
+        # 5. 分层绘制：先画非漏洞（底层），再画漏洞（上层）
+        # ------------------------------------------
+        non_vuln_mask = ~vuln_mask
+        # 非漏洞：灰色 x
+        if np.any(non_vuln_mask):
             plt.scatter(
-                x,
-                y,
-                c=[color_val],
-                marker=markers[i],
+                x[non_vuln_mask],
+                y[non_vuln_mask],
+                c="lightgray",
+                marker="x",
                 s=20,
                 edgecolors="none",
+                label="_nolegend_",
             )
 
-        # ------------------------------------------
-        # 4. 图例
-        # ------------------------------------------
-        for cwe in cwe_unique:
-            color_idx = cwe_to_color[cwe]
-            plt.plot(
-                [],
-                [],
-                "o",
-                color=cmap(color_idx / max(len(cwe_unique) - 1, 1)),
-                label=cwe,
-                markersize=5,
-            )
+        # 漏洞：按 CWE 上色，圆圈
+        for cwe in cwe_unique_vuln:
+            cwe_mask = (cwes == cwe) & vuln_mask
+            if np.any(cwe_mask):
+                plt.scatter(
+                    x[cwe_mask],
+                    y[cwe_mask],
+                    c=[cwe_to_color[cwe]],
+                    marker="o",
+                    s=20,
+                    edgecolors="none",
+                    label=cwe,
+                )
 
-        # Vulnerable vs Non-vulnerable legends
-        plt.plot([], [], "o", color="black", label="Vulnerable", markersize=5)
-        plt.plot([], [], "x", color="black", label="Non-vulnerable", markersize=5)
-
+        # ------------------------------------------
+        # 6. 图例 + 保存
+        # ------------------------------------------
         plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
         plt.tight_layout()
+
         if epoch is None:
             plt.title(f"UMAP Projection - {split_name}")
-            plt.savefig(os.path.join(OUTPUT_DIR, f"umap_{split_name}.svg"))
+            output_path = os.path.join(OUTPUT_DIR, f"umap_{split_name}.svg")
         else:
             plt.title(f"UMAP Projection - {split_name} (Epoch {epoch})")
-            plt.savefig(os.path.join(OUTPUT_DIR, f"umap_{split_name}_epoch_{epoch}.svg"))
+            output_path = os.path.join(
+                OUTPUT_DIR, f"umap_{split_name}_epoch_{epoch}.svg"
+            )
+
+        plt.savefig(output_path, bbox_inches="tight")
         plt.close()
 
     def _plot_prototype_heatmap(self, prototypes, class_labels, split_name, epoch=None):
         sim_matrix = torch.mm(prototypes, prototypes.t()).cpu().numpy()
-        plt.figure(figsize=(10, 8))
+        n_classes = len(class_labels)
+
+        # 自适应 figsize：每个类别占 ~0.5 英寸，至少 6x6
+        cell_size = 0.5
+        fig_width = max(6, n_classes * cell_size)
+        fig_height = max(6, n_classes * cell_size)
+
+        plt.figure(figsize=(fig_width, fig_height))
         sns.heatmap(
             sim_matrix,
             xticklabels=class_labels,
             yticklabels=class_labels,
             cmap="viridis",
+            square=True,  # 保证单元格为正方形
+            cbar_kws={"shrink": 0.8},  # 色标条适当缩小
         )
-        plt.tight_layout()
         plt.title(f"Prototype Similarity Heatmap - {split_name}")
+
+        # 自动调整标签旋转（可选，提升可读性）
+        plt.xticks(rotation=45, ha="right")
+        plt.yticks(rotation=0)
+
+        plt.tight_layout()
+
         if epoch is None:
-            plt.savefig(
-                os.path.join(
-                    OUTPUT_DIR, f"prototype_heatmap_{split_name}.svg"
-                )
+            output_path = os.path.join(
+                OUTPUT_DIR, f"prototype_heatmap_{split_name}.svg"
             )
         else:
-            plt.savefig(
-                os.path.join(
-                    OUTPUT_DIR, f"prototype_heatmap_{split_name}_epoch_{epoch}.svg"
-                )
+            output_path = os.path.join(
+                OUTPUT_DIR, f"prototype_heatmap_{split_name}_epoch_{epoch}.svg"
             )
+
+        plt.savefig(output_path, bbox_inches="tight")
         plt.close()
 
     def _compute_thresholds(self, train_embeddings, train_labels):
@@ -816,22 +843,25 @@ class Trainer:
             ch_score, nmi_score = self._evaluate_epoch(val_loader, "val", epoch + 1)
             print(
                 f"""Val CH: {ch_score:.4f}, NMI: {nmi_score:.4f}, 
-                Avg Loss: {avg_loss:.4f}, History Best Loss: ${self.best_val_loss:.4f}
-                Loss Kappa: {loss_kappa.item():.4f}, Loss Proto: {loss_proto.item():.4f}"""
+Avg Loss: {avg_loss:.4f}, History Best Loss: ${self.best_val_loss:.4f}
+Loss Kappa: {loss_kappa.item():.4f}, Loss Proto: {loss_proto.item():.4f}"""
             )
 
             # Early stopping
             if avg_loss < self.best_val_loss:
                 self.best_val_loss = avg_loss
-                self.epochs_no_improve = 0
+                self.patience_counter = 0
                 # Save best model
                 torch.save(
                     self.model.state_dict(), os.path.join(OUTPUT_DIR, "best_model.pth")
                 )
             else:
-                self.epochs_no_improve += 1
+                self.patience_counter += 1
+                print(
+                    f"Patience Counter: {self.patience_counter}/{EARLY_STOPPING_PATIENCE}"
+                )
 
-            if self.epochs_no_improve >= EARLY_STOPPING_PATIENCE:
+            if self.patience_counter >= EARLY_STOPPING_PATIENCE:
                 print("Early stopping triggered.")
                 break
 
@@ -842,6 +872,7 @@ class Trainer:
         )
 
         # Compute prototypes and thresholds from training set
+        # Step 1: Compute prototypes from TRAIN set (model representation)
         self.model.eval()
         train_loader_full = DataLoader(
             self.train_dataset,
@@ -852,7 +883,7 @@ class Trainer:
         all_train_embs = []
         all_train_labels = []
         with torch.no_grad():
-            for batch in tqdm(train_loader_full, desc="Computing train embeddings"):
+            for batch in tqdm(train_loader_full, desc="Computing train embeddings for prototypes"):
                 embs = self.model(
                     batch["input_ids"].to(DEVICE), batch["attention_mask"].to(DEVICE)
                 )
@@ -861,8 +892,29 @@ class Trainer:
                 all_train_labels.extend(label_indices)
         all_train_embs = torch.cat(all_train_embs, dim=0)
         all_train_labels = torch.tensor(all_train_labels, device=DEVICE)
-        thresholds, prototypes = self._compute_thresholds(
-            all_train_embs, all_train_labels
+        prototypes = self._compute_prototypes(all_train_embs, all_train_labels)
+
+        # Step 2: Compute thresholds from VALIDATION set (hyperparameter tuning)
+        val_loader_full = DataLoader(
+            self.val_dataset,
+            batch_size=BATCH_SIZE,
+            shuffle=False,
+            collate_fn=custom_collate_fn,
+        )
+        all_val_embs = []
+        all_val_labels = []
+        with torch.no_grad():
+            for batch in tqdm(val_loader_full, desc="Computing val embeddings for thresholds"):
+                embs = self.model(
+                    batch["input_ids"].to(DEVICE), batch["attention_mask"].to(DEVICE)
+                )
+                all_val_embs.append(embs)
+                label_indices = [self.class_to_idx[k] for k in batch["class_key"]]
+                all_val_labels.extend(label_indices)
+        all_val_embs = torch.cat(all_val_embs, dim=0)
+        all_val_labels = torch.tensor(all_val_labels, device=DEVICE)
+        thresholds = self._compute_thresholds_from_embeddings(
+            all_val_embs, all_val_labels, prototypes
         )
 
         test_loader = DataLoader(
@@ -894,7 +946,7 @@ def main():
     print("Start training...")
     print("Trainning Arguments:")
     print(f"Dataset: {DATASET_NAME} - {SUBSET_NAME}")
-    print(f"Model: {MODEL_NAME}")
+    print(f"Model: {MODEL_NAME}, Layers to Concat: {ROBERTA_LAYERS_TO_CONCAT}")
     print(f"Batch Size: {BATCH_SIZE}, Random Seed: {RANDOM_SEED}")
     print(f"Learning Rate: {LEARNING_RATE}, Weight Decay: {WEIGHT_DECAY}")
     print(f"Max Epochs: {MAX_EPOCHS}")
