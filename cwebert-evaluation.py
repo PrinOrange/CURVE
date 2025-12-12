@@ -30,7 +30,7 @@ warnings.filterwarnings("ignore")
 # 配置：请根据你的训练设置修改以下路径和参数
 # ========================
 
-MODEL_DIR = "output_primevul-paired_20251211-181517"  # 👈 修改这里！
+MODEL_DIR = "output_primevul-paired_20251212-14-07-12"  # 👈 修改这里！
 EVALUATION_OUTPUT_DIR = os.path.join(MODEL_DIR, "evaluation")
 
 DATASET_NAME = "codemetic/curve"
@@ -49,6 +49,7 @@ os.makedirs(EVALUATION_OUTPUT_DIR, exist_ok=True)
 # ========================
 # 模型定义
 # ========================
+
 
 class KappaFaceHead(nn.Module):
     def __init__(self, in_features: int, num_classes: int):
@@ -152,7 +153,7 @@ def build_class_mappings(dataset_name: str, subset_name: str):
     print("Rebuilding class mappings from dataset...")
     dataset = load_dataset(dataset_name, subset_name)
     all_items = []
-    for split in ["train", "validation", "test"]:
+    for split in ["train", "val", "test"]:
         if split in dataset:
             all_items.extend(dataset[split])
     class_set = {(bool(item["label"]), str(item["cwe"])) for item in all_items}
@@ -233,9 +234,7 @@ def compute_thresholds(
 # ========================
 
 
-def draw_plot_umap(
-    embeddings: np.ndarray, class_keys: List[Tuple[bool, str]], split_name: str
-):
+def draw_plot_umap(embeddings: np.ndarray, class_keys: List[Tuple[bool, str]]):
     total_samples = len(class_keys)
     stratify_labels = np.array([f"{ck[1]}_{ck[0]}" for ck in class_keys])
 
@@ -286,17 +285,17 @@ def draw_plot_umap(
             )
 
     plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
-    plt.title(f"UMAP Projection - {split_name} Evaluation")
+    plt.title(f"UMAP Projection - Evaluation")
     plt.tight_layout()
     plt.savefig(
-        os.path.join(EVALUATION_OUTPUT_DIR, f"umap_{split_name}_evaluation.svg"),
+        os.path.join(EVALUATION_OUTPUT_DIR, f"umap_evaluation.svg"),
         bbox_inches="tight",
     )
     plt.close()
 
 
 def draw_prototype_heatmap(
-    prototypes: torch.Tensor, idx_to_class: Dict[int, Tuple[bool, str]], split_name: str
+    prototypes: torch.Tensor, idx_to_class: Dict[int, Tuple[bool, str]]
 ):
     sim_matrix = torch.mm(prototypes, prototypes.t()).cpu().numpy()
     class_labels = [
@@ -317,12 +316,10 @@ def draw_prototype_heatmap(
     )
     plt.xticks(rotation=45, ha="right")
     plt.yticks(rotation=0)
-    plt.title(f"Prototype Similarity Heatmap - {split_name}")
+    plt.title(f"Prototype Similarity Heatmap - Evaluation")
     plt.tight_layout()
     plt.savefig(
-        os.path.join(
-            EVALUATION_OUTPUT_DIR, f"prototype_heatmap_{split_name}_evaluation.svg"
-        ),
+        os.path.join(EVALUATION_OUTPUT_DIR, f"prototype_heatmap_evaluation.svg"),
         bbox_inches="tight",
     )
     plt.close()
@@ -337,9 +334,7 @@ def main():
     assert os.path.exists(model_path), f"Model not found at {model_path}"
 
     # Load class mappings
-    class_to_idx, idx_to_class = build_class_mappings(
-        DATASET_NAME, SUBSET_NAME
-    )
+    class_to_idx, idx_to_class = build_class_mappings(DATASET_NAME, SUBSET_NAME)
     num_classes = len(class_to_idx)
 
     # Load model
@@ -477,8 +472,8 @@ def main():
 
     # Save embeddings for UMAP (use full eval set for consistency)
     test_embeddings, _ = extract_embeddings(model, test_loader, class_to_idx, DEVICE)
-    draw_plot_umap(test_embeddings.numpy(), all_true_class_keys, EVAL_SPLIT)
-    draw_prototype_heatmap(prototypes, idx_to_class, EVAL_SPLIT)
+    draw_plot_umap(test_embeddings.numpy(), all_true_class_keys)
+    draw_prototype_heatmap(prototypes, idx_to_class)
 
     print(f"\nCWE Multi-class Metrics ({EVAL_SPLIT}):")
     print(f"Macro F1: {macro_f1:.4f}, Micro F1: {micro_f1:.4f}")
