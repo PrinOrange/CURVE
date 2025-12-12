@@ -42,7 +42,7 @@ MODEL_NAME = "codemetic/CweBERT-mlm"
 # The outer layer has more code structure features while the inner layer has more semantic features.
 ROBERTA_LAYERS_TO_CONCAT = (6, 7, 8, 9)
 
-MAX_LENGTH = 152
+MAX_LENGTH = 512
 BATCH_SIZE = 64
 LEARNING_RATE = 2e-5
 WEIGHT_DECAY = 0.01
