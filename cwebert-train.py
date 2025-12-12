@@ -1,8 +1,13 @@
+import inspect
 import json
 import math
 import os
+import random
+import sys
+import time
 import warnings
 from collections import Counter
+
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
@@ -12,20 +17,17 @@ import torch.nn.functional as F
 from datasets import load_dataset
 from sklearn.cluster import KMeans
 from sklearn.metrics import (
-    accuracy_score,
-    confusion_matrix,
-    matthews_corrcoef,
+    adjusted_mutual_info_score,
+    adjusted_rand_score,
+    calinski_harabasz_score,
+    davies_bouldin_score,
     normalized_mutual_info_score,
-    precision_recall_fscore_support,
 )
 from sklearn.model_selection import StratifiedShuffleSplit
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from transformers import RobertaConfig, RobertaModel, RobertaTokenizer
 from umap import UMAP
-import random
-import time
-import seaborn as sns
 
 warnings.filterwarnings("ignore")
 
@@ -43,10 +45,10 @@ MODEL_NAME = "codemetic/CweBERT-mlm"
 ROBERTA_LAYERS_TO_CONCAT = (6, 7, 8, 9)
 
 MAX_LENGTH = 512
-BATCH_SIZE = 64
+BATCH_SIZE = 128
 LEARNING_RATE = 2e-5
 WEIGHT_DECAY = 0.01
-MAX_EPOCHS = 1800
+MAX_EPOCHS = 6000
 EARLY_STOPPING_PATIENCE = int(MAX_EPOCHS * 0.1)
 RANDOM_SEED = 42
 
@@ -66,21 +68,23 @@ MOMENTUM = 0.999  # momentum encoder coefficient
 
 # Device
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# torch.set_default_device(DEVICE)
 
 # Image settings
 UMAP_MAX_POINTS = 10000
 
 # Output directory
-OUTPUT_DIR = f"output_{SUBSET_NAME}_{time.strftime('%Y%m%d-%H%M%S')}"
+OUTPUT_DIR = f"output_{SUBSET_NAME}_{time.strftime('%Y%m%d-%H-%M-%S')}"
+PROTOTYPE_HEATMAP_OUTPUT_DIR = os.path.join(OUTPUT_DIR, "val_prototype_heatmap")
+UMAP_OUTPUT_DIR = os.path.join(OUTPUT_DIR, "val_umap")
+
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(PROTOTYPE_HEATMAP_OUTPUT_DIR, exist_ok=True)
+os.makedirs(UMAP_OUTPUT_DIR, exist_ok=True)
 
 
 # ========================
 # Utility Functions
 # ========================
-
-
 def set_seed():
     random.seed(RANDOM_SEED)
     np.random.seed(RANDOM_SEED)
@@ -90,6 +94,34 @@ def set_seed():
         torch.cuda.manual_seed_all(RANDOM_SEED)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+
+
+def save_training_config():
+    config = {
+        "SUBSET_NAME": SUBSET_NAME,
+        "DATASET_NAME": DATASET_NAME,
+        "MODEL_NAME": MODEL_NAME,
+        "ROBERTA_LAYERS_TO_CONCAT": ROBERTA_LAYERS_TO_CONCAT,
+        "MAX_LENGTH": MAX_LENGTH,
+        "BATCH_SIZE": BATCH_SIZE,
+        "LEARNING_RATE": LEARNING_RATE,
+        "WEIGHT_DECAY": WEIGHT_DECAY,
+        "MAX_EPOCHS": MAX_EPOCHS,
+        "EARLY_STOPPING_PATIENCE": EARLY_STOPPING_PATIENCE,
+        "RANDOM_SEED": RANDOM_SEED,
+        "GAMMA": GAMMA,
+        "TEMPERATURE_T": TEMPERATURE_T,
+        "M0": M0,
+        "S": S,
+        "LAMBDA_PROTO": LAMBDA_PROTO,
+        "USE_MOMENTUM_ENCODER": USE_MOMENTUM_ENCODER,
+        "ALPHA": ALPHA,
+        "MOMENTUM": MOMENTUM,
+        "UMAP_MAX_POINTS": UMAP_MAX_POINTS,
+        "DEVICE": str(DEVICE),
+    }
+    with open(os.path.join(OUTPUT_DIR, "training_config.json"), "w") as f:
+        json.dump(config, f, indent=2)
 
 
 def custom_collate_fn(batch):
@@ -140,9 +172,200 @@ def compute_ch_score(embeddings: np.ndarray, labels: np.ndarray) -> float:
     """Calinski-Harabasz Index"""
     if len(np.unique(labels)) <= 1:
         return 0.0
-    from sklearn.metrics import calinski_harabasz_score
-
     return calinski_harabasz_score(embeddings, labels)
+
+
+def compute_dunn_index(embeddings: np.ndarray, labels: np.ndarray) -> float:
+    """Compute Dunn Index: min_inter_cluster_distance / max_intra_cluster_diameter"""
+    from scipy.spatial.distance import pdist, squareform
+
+    unique_labels = np.unique(labels)
+    if len(unique_labels) < 2:
+        return 0.0
+
+    # Compute pairwise distances
+    distances = squareform(pdist(embeddings, metric="euclidean"))
+
+    min_inter = float("inf")
+    max_intra = 0.0
+
+    for i, label_i in enumerate(unique_labels):
+        mask_i = labels == label_i
+        cluster_i = embeddings[mask_i]
+
+        # Intra-cluster diameter (max distance within cluster)
+        if len(cluster_i) > 1:
+            intra_dists = pdist(cluster_i, metric="euclidean")
+            max_intra = max(max_intra, np.max(intra_dists))
+        else:
+            # Single point → diameter = 0
+            pass
+
+        # Inter-cluster distance to other clusters (min distance between any two points)
+        for label_j in unique_labels[i + 1 :]:
+            mask_j = labels == label_j
+            cluster_j = embeddings[mask_j]
+
+            # Compute min distance between cluster_i and cluster_j
+            inter_dists = distances[np.ix_(mask_i, mask_j)]
+            min_inter = min(min_inter, np.min(inter_dists))
+
+    if max_intra == 0 or min_inter == float("inf"):
+        return 0.0
+    return min_inter / max_intra
+
+
+def compute_class_separation_index(embeddings: np.ndarray, labels: np.ndarray) -> float:
+    """
+    Class Separation Index = min_{i≠j} ||μ_i - μ_j||_2 / max_k (diameter of cluster k)
+    """
+    from scipy.spatial.distance import pdist
+
+    unique_labels = np.unique(labels)
+    if len(unique_labels) < 2:
+        return 0.0
+
+    # Compute centroids and diameters
+    centroids = []
+    diameters = []
+
+    for label in unique_labels:
+        cluster = embeddings[labels == label]
+        centroid = np.mean(cluster, axis=0)
+        centroids.append(centroid)
+
+        if len(cluster) > 1:
+            intra_dists = pdist(cluster, metric="euclidean")
+            diameter = np.max(intra_dists)
+        else:
+            diameter = 0.0
+        diameters.append(diameter)
+
+    centroids = np.array(centroids)
+    max_diameter = np.max(diameters)
+
+    # Min distance between any two centroids
+    if len(centroids) > 1:
+        inter_centroid_dists = pdist(centroids, metric="euclidean")
+        min_centroid_dist = np.min(inter_centroid_dists)
+    else:
+        min_centroid_dist = 0.0
+
+    if max_diameter == 0:
+        return float("inf") if min_centroid_dist > 0 else 0.0
+    return min_centroid_dist / max_diameter
+
+
+def draw_umap(embeddings, class_keys, split_name, epoch):
+    # ------------------------------------------
+    # 1. 分层抽样
+    # ------------------------------------------
+    total_samples = len(class_keys)
+    stratify_labels = np.array([f"{ck[1]}_{ck[0]}" for ck in class_keys])
+    if total_samples > UMAP_MAX_POINTS:
+        split = StratifiedShuffleSplit(
+            n_splits=1, train_size=UMAP_MAX_POINTS, random_state=42
+        )
+        sampled_idx, _ = next(split.split(np.zeros(total_samples), stratify_labels))
+    else:
+        sampled_idx = np.arange(total_samples)
+    sampled_embeddings = embeddings[sampled_idx]
+    sampled_class_keys = [class_keys[i] for i in sampled_idx]
+    # ------------------------------------------
+    # 2. UMAP 降维
+    # ------------------------------------------
+    reducer = UMAP(n_components=2, random_state=42)
+    umap_embeddings = reducer.fit_transform(sampled_embeddings)
+    labels = np.array([ck[0] for ck in sampled_class_keys])  # bool array
+    cwes = np.array([ck[1] for ck in sampled_class_keys])
+    # ------------------------------------------
+    # 3. 颜色映射（仅漏洞样本按 CWE 上色）
+    # ------------------------------------------
+    vuln_mask = labels.astype(bool)
+    vulnerable_cwes = cwes[vuln_mask]
+    cwe_unique_vuln = sorted(set(vulnerable_cwes))
+    if cwe_unique_vuln:
+        palette = sns.color_palette("husl", n_colors=len(cwe_unique_vuln))
+        cwe_to_color = {cwe: palette[i] for i, cwe in enumerate(cwe_unique_vuln)}
+    else:
+        cwe_to_color = {}
+    # ------------------------------------------
+    # 4. 自适应 figsize
+    # ------------------------------------------
+    num_legend_items = len(cwe_unique_vuln) + 1  # +1 for "Non-vulnerable"
+    fig_width = max(10, 8 + 0.4 * num_legend_items)
+    fig_height = 8
+    plt.figure(figsize=(fig_width, fig_height))
+    x = umap_embeddings[:, 0]
+    y = umap_embeddings[:, 1]
+    # ------------------------------------------
+    # 5. 分层绘制：先画非漏洞（底层），再画漏洞（上层）
+    # ------------------------------------------
+    non_vuln_mask = ~vuln_mask
+    # 非漏洞：灰色 x
+    if np.any(non_vuln_mask):
+        plt.scatter(
+            x[non_vuln_mask],
+            y[non_vuln_mask],
+            c="lightgray",
+            marker="x",
+            s=20,
+            edgecolors="none",
+            label="_nolegend_",
+        )
+    # 漏洞：按 CWE 上色，圆圈
+    for cwe in cwe_unique_vuln:
+        cwe_mask = (cwes == cwe) & vuln_mask
+        if np.any(cwe_mask):
+            plt.scatter(
+                x[cwe_mask],
+                y[cwe_mask],
+                c=[cwe_to_color[cwe]],
+                marker="o",
+                s=20,
+                edgecolors="none",
+                label=cwe,
+            )
+    # ------------------------------------------
+    # 6. 图例 + 保存
+    # ------------------------------------------
+    plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
+    plt.tight_layout()
+    plt.title(f"UMAP Projection - {split_name} - Epoch: {epoch}")
+    fig_output_path = os.path.join(
+        UMAP_OUTPUT_DIR, f"umap_{split_name}_epoch_{epoch}.svg"
+    )
+    plt.savefig(fig_output_path, bbox_inches="tight")
+    plt.close()
+
+
+def draw_prototype_heatmap(prototypes, class_labels, split_name, epoch=None):
+    sim_matrix = torch.mm(prototypes, prototypes.t()).cpu().numpy()
+    n_classes = len(class_labels)
+    # 自适应 figsize：每个类别占 ~0.5 英寸，至少 6x6
+    cell_size = 0.5
+    fig_width = max(6, n_classes * cell_size)
+    fig_height = max(6, n_classes * cell_size)
+    plt.figure(figsize=(fig_width, fig_height))
+    sns.heatmap(
+        sim_matrix,
+        xticklabels=class_labels,
+        yticklabels=class_labels,
+        cmap="viridis",
+        square=True,  # 保证单元格为正方形
+        cbar_kws={"shrink": 0.8},  # 色标条适当缩小
+    )
+    plt.title(f"Prototype Similarity Heatmap - {split_name} - Epoch: {epoch}")
+    # 自动调整标签旋转（可选，提升可读性）
+    plt.xticks(rotation=45, ha="right")
+    plt.yticks(rotation=0)
+    plt.tight_layout()
+    fig_output_path = os.path.join(
+        PROTOTYPE_HEATMAP_OUTPUT_DIR,
+        f"prototype_heatmap_{split_name}_epoch_{epoch}.svg",
+    )
+    plt.savefig(fig_output_path, bbox_inches="tight")
+    plt.close()
 
 
 # ========================
@@ -197,7 +420,6 @@ class RoBERTaEncoder(nn.Module):
         outputs = self.roberta(input_ids=input_ids, attention_mask=attention_mask)
         # hidden_states is a tuple of (layer0, layer1, ..., layer12)
         hidden_states = outputs.hidden_states  # tuple of 13 tensors
-        # We want layers [-9, -8, -7, -6] → indexes [4,5,6,7] (since len=13)
         selected_layers = []
         for layer_idx in self.layers_to_concat:
             actual_idx = -(layer_idx)  # e.g., -6 → index 7 in 0-based 13-length list
@@ -411,21 +633,60 @@ class Trainer:
                 prototypes[c] = torch.mean(embeddings[mask], dim=0)
         return l2_norm(prototypes)
 
-    def _evaluate_epoch(self, dataloader, split_name, epoch):
+    def _evaluate_current_epoch(self, dataloader, split_name, epoch):
         self.model.eval()
         all_embeddings = []
         all_labels = []
         all_class_keys = []
+        total_val_loss = 0.0
+        total_samples = 0
 
+        # Step 1: Compute dynamic margins for validation using current model (same as train logic but without momentum/buffer)
+        # We'll collect all embeddings and labels first
         with torch.no_grad():
-            for batch in tqdm(dataloader, desc=f"Evaluating {split_name}"):
-                embeddings = self.model(
+            all_val_embeddings = []
+            all_val_labels = []
+            for batch in dataloader:
+                embeddings = self.model.encoder(
                     batch["input_ids"].to(DEVICE), batch["attention_mask"].to(DEVICE)
                 )
-                all_embeddings.append(embeddings.cpu())
+                embeddings_norm = l2_norm(embeddings)
                 label_indices = [self.class_to_idx[k] for k in batch["class_key"]]
+                labels_tensor = torch.tensor(label_indices, device=DEVICE)
+                all_val_embeddings.append(embeddings_norm)
+                all_val_labels.append(labels_tensor)
+            all_val_embeddings = torch.cat(all_val_embeddings, dim=0)
+            all_val_labels = torch.cat(all_val_labels, dim=0)
+
+        # Compute margins using current embeddings (same as training logic)
+        margins = self._compute_dynamic_margins(all_val_embeddings, all_val_labels)
+
+        # Now compute loss and collect embeddings for metrics
+        with torch.no_grad():
+            for batch in tqdm(dataloader, desc=f"Evaluating {split_name}"):
+                input_ids = batch["input_ids"].to(DEVICE)
+                attention_mask = batch["attention_mask"].to(DEVICE)
+                label_indices = [self.class_to_idx[k] for k in batch["class_key"]]
+                labels = torch.tensor(label_indices, device=DEVICE)
+
+                features_norm, logits = self.model(
+                    input_ids, attention_mask, labels, margins
+                )
+                loss_kappa = kappaface_loss(logits, labels)
+                prototypes = self._compute_prototypes(features_norm, labels)
+                loss_proto = prototype_loss(
+                    features_norm, labels, prototypes, self.num_classes
+                )
+                loss = (1 - LAMBDA_PROTO) * loss_kappa + LAMBDA_PROTO * loss_proto
+
+                total_val_loss += loss.item() * labels.size(0)
+                total_samples += labels.size(0)
+
+                all_embeddings.append(features_norm.cpu())
                 all_labels.extend(label_indices)
                 all_class_keys.extend(batch["class_key"])
+
+        avg_val_loss = total_val_loss / total_samples
 
         all_embeddings = torch.cat(all_embeddings, dim=0)
         all_embeddings_np = all_embeddings.numpy()
@@ -434,304 +695,49 @@ class Trainer:
         # Compute clustering metrics
         ch_score = compute_ch_score(all_embeddings_np, all_labels_np)
 
+        # Compute clustering metrics
+        ch_score = compute_ch_score(all_embeddings_np, all_labels_np)
+
         if len(np.unique(all_labels_np)) > 1:
             kmeans = KMeans(n_clusters=len(np.unique(all_labels_np)), random_state=42)
             cluster_labels = kmeans.fit_predict(all_embeddings_np)
+
             nmi_score = normalized_mutual_info_score(all_labels_np, cluster_labels)
+            ami_score = adjusted_mutual_info_score(all_labels_np, cluster_labels)
+            ari_score = adjusted_rand_score(all_labels_np, cluster_labels)
+            dbi_score = davies_bouldin_score(all_embeddings_np, cluster_labels)
+            dunn_score = compute_dunn_index(all_embeddings_np, cluster_labels)
+            separation_score = compute_class_separation_index(
+                all_embeddings_np, cluster_labels
+            )
         else:
-            nmi_score = 0.0  # or np.nan, but 0 is safer for logging
+            nmi_score = ami_score = ari_score = dbi_score = dunn_score = (
+                separation_score
+            ) = 0.0
 
-        # Plot UMAP
-        self._plot_umap(all_embeddings_np, all_class_keys, split_name, epoch)
-
-        all_embeddings_gpu = all_embeddings.to(DEVICE)
-        all_labels_tensor = torch.tensor(all_labels, device=DEVICE)
-        prototypes = self._compute_prototypes(all_embeddings_gpu, all_labels_tensor)
-
-        # 构造 class labels（字符串形式，用于 heatmap 显示）
+        # Plot UMAP and heatmap
+        draw_umap(all_embeddings_np, all_class_keys, split_name, epoch)
         unique_labels = sorted(set(all_labels))
         class_labels = [
             f"{self.idx_to_class[idx][1]}_{self.idx_to_class[idx][0]}"
             for idx in unique_labels
         ]
-
-        # 绘制热力图
-        self._plot_prototype_heatmap(prototypes, class_labels, split_name, epoch)
-
-        return ch_score, nmi_score
-
-    def _plot_umap(self, embeddings, class_keys, split_name, epoch=None):
-        # ------------------------------------------
-        # 1. 分层抽样
-        # ------------------------------------------
-        total_samples = len(class_keys)
-        stratify_labels = np.array([f"{ck[1]}_{ck[0]}" for ck in class_keys])
-
-        if total_samples > UMAP_MAX_POINTS:
-            split = StratifiedShuffleSplit(
-                n_splits=1, train_size=UMAP_MAX_POINTS, random_state=42
-            )
-            sampled_idx, _ = next(split.split(np.zeros(total_samples), stratify_labels))
-        else:
-            sampled_idx = np.arange(total_samples)
-
-        sampled_embeddings = embeddings[sampled_idx]
-        sampled_class_keys = [class_keys[i] for i in sampled_idx]
-
-        # ------------------------------------------
-        # 2. UMAP 降维
-        # ------------------------------------------
-        reducer = UMAP(n_components=2, random_state=42)
-        umap_embeddings = reducer.fit_transform(sampled_embeddings)
-
-        labels = np.array([ck[0] for ck in sampled_class_keys])  # bool array
-        cwes = np.array([ck[1] for ck in sampled_class_keys])
-
-        # ------------------------------------------
-        # 3. 颜色映射（仅漏洞样本按 CWE 上色）
-        # ------------------------------------------
-        vuln_mask = labels.astype(bool)
-        vulnerable_cwes = cwes[vuln_mask]
-        cwe_unique_vuln = sorted(set(vulnerable_cwes))
-
-        if cwe_unique_vuln:
-            palette = sns.color_palette("husl", n_colors=len(cwe_unique_vuln))
-            cwe_to_color = {cwe: palette[i] for i, cwe in enumerate(cwe_unique_vuln)}
-        else:
-            cwe_to_color = {}
-
-        # ------------------------------------------
-        # 4. 自适应 figsize
-        # ------------------------------------------
-        num_legend_items = len(cwe_unique_vuln) + 1  # +1 for "Non-vulnerable"
-        fig_width = max(10, 8 + 0.4 * num_legend_items)
-        fig_height = 8
-        plt.figure(figsize=(fig_width, fig_height))
-
-        x = umap_embeddings[:, 0]
-        y = umap_embeddings[:, 1]
-
-        # ------------------------------------------
-        # 5. 分层绘制：先画非漏洞（底层），再画漏洞（上层）
-        # ------------------------------------------
-        non_vuln_mask = ~vuln_mask
-        # 非漏洞：灰色 x
-        if np.any(non_vuln_mask):
-            plt.scatter(
-                x[non_vuln_mask],
-                y[non_vuln_mask],
-                c="lightgray",
-                marker="x",
-                s=20,
-                edgecolors="none",
-                label="_nolegend_",
-            )
-
-        # 漏洞：按 CWE 上色，圆圈
-        for cwe in cwe_unique_vuln:
-            cwe_mask = (cwes == cwe) & vuln_mask
-            if np.any(cwe_mask):
-                plt.scatter(
-                    x[cwe_mask],
-                    y[cwe_mask],
-                    c=[cwe_to_color[cwe]],
-                    marker="o",
-                    s=20,
-                    edgecolors="none",
-                    label=cwe,
-                )
-
-        # ------------------------------------------
-        # 6. 图例 + 保存
-        # ------------------------------------------
-        plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
-        plt.tight_layout()
-
-        if epoch is None:
-            plt.title(f"UMAP Projection - {split_name}")
-            output_path = os.path.join(OUTPUT_DIR, f"umap_{split_name}.svg")
-        else:
-            plt.title(f"UMAP Projection - {split_name} (Epoch {epoch})")
-            output_path = os.path.join(
-                OUTPUT_DIR, f"umap_{split_name}_epoch_{epoch}.svg"
-            )
-
-        plt.savefig(output_path, bbox_inches="tight")
-        plt.close()
-
-    def _plot_prototype_heatmap(self, prototypes, class_labels, split_name, epoch=None):
-        sim_matrix = torch.mm(prototypes, prototypes.t()).cpu().numpy()
-        n_classes = len(class_labels)
-
-        # 自适应 figsize：每个类别占 ~0.5 英寸，至少 6x6
-        cell_size = 0.5
-        fig_width = max(6, n_classes * cell_size)
-        fig_height = max(6, n_classes * cell_size)
-
-        plt.figure(figsize=(fig_width, fig_height))
-        sns.heatmap(
-            sim_matrix,
-            xticklabels=class_labels,
-            yticklabels=class_labels,
-            cmap="viridis",
-            square=True,  # 保证单元格为正方形
-            cbar_kws={"shrink": 0.8},  # 色标条适当缩小
+        prototypes = self._compute_prototypes(
+            all_embeddings.to(DEVICE), torch.tensor(all_labels, device=DEVICE)
         )
-        plt.title(f"Prototype Similarity Heatmap - {split_name}")
+        draw_prototype_heatmap(prototypes, class_labels, split_name, epoch)
 
-        # 自动调整标签旋转（可选，提升可读性）
-        plt.xticks(rotation=45, ha="right")
-        plt.yticks(rotation=0)
-
-        plt.tight_layout()
-
-        if epoch is None:
-            output_path = os.path.join(
-                OUTPUT_DIR, f"prototype_heatmap_{split_name}.svg"
-            )
-        else:
-            output_path = os.path.join(
-                OUTPUT_DIR, f"prototype_heatmap_{split_name}_epoch_{epoch}.svg"
-            )
-
-        plt.savefig(output_path, bbox_inches="tight")
-        plt.close()
-
-    def _compute_thresholds(self, train_embeddings, train_labels):
-        """Compute threshold τ per class to maximize F1"""
-        thresholds = {}
-        prototypes = self._compute_prototypes(train_embeddings, train_labels)
-        train_embeddings_np = train_embeddings.cpu().numpy()
-        train_labels_np = train_labels.cpu().numpy()
-
-        for c in range(self.num_classes):
-            mask = train_labels_np == c
-            if not np.any(mask):
-                thresholds[c] = 0.5
-                continue
-            class_embs = train_embeddings_np[mask]
-            sims = (
-                cosine_similarity_torch(
-                    torch.tensor(class_embs, device=DEVICE), prototypes[c].unsqueeze(0)
-                )
-                .cpu()
-                .numpy()
-            )
-            # Try thresholds
-            best_f1 = 0
-            best_tau = 0.5
-            for tau in np.linspace(0.0, 1.0, 100):
-                preds = (sims >= tau).astype(int)
-                if preds.sum() == 0:
-                    continue
-                f1 = precision_recall_fscore_support(
-                    np.ones_like(preds), preds, average="binary", zero_division=0
-                )[2]
-                if f1 > best_f1:
-                    best_f1 = f1
-                    best_tau = tau
-            thresholds[c] = best_tau
-        return thresholds, prototypes
-
-    def _evaluate_final(self, dataloader, thresholds, prototypes, split_name):
-        self.model.eval()
-        all_embeddings = []
-        all_true_labels = []
-        all_true_class_keys = []
-        all_pred_class_indices = []
-        all_labels = []
-        all_class_keys = []
-
-        with torch.no_grad():
-            for batch in tqdm(dataloader, desc=f"Final {split_name} evaluation"):
-                embeddings = self.model(
-                    batch["input_ids"].to(DEVICE), batch["attention_mask"].to(DEVICE)
-                )
-                all_embeddings.append(embeddings)
-                all_true_labels.extend(batch["label"])
-                label_indices = [self.class_to_idx[k] for k in batch["class_key"]]
-                all_labels.extend(label_indices)
-                all_true_class_keys.extend(batch["class_key"])
-
-        all_embeddings = torch.cat(all_embeddings, dim=0)
-        all_pred_class_indices = []
-
-        # Predict using prototype distances
-        for i in range(all_embeddings.size(0)):
-            emb = all_embeddings[i : i + 1]  # (1, D)
-            sims = torch.mm(emb, prototypes.t()).squeeze(0)  # (C,)
-            max_sim, pred_class = torch.max(sims, dim=0)
-            tau = thresholds[pred_class.item()]
-            if max_sim >= tau:
-                all_pred_class_indices.append(pred_class.item())
-            else:
-                all_pred_class_indices.append(-1)  # unknown
-
-        # Convert to binary predictions
-        y_true_binary = np.array(all_true_labels)
-        y_pred_binary = []
-        for pred_idx, true_key in zip(all_pred_class_indices, all_true_class_keys):
-            if pred_idx == -1:
-                y_pred_binary.append(False)  # unknown → treat as non-vuln
-            else:
-                pred_key = self.idx_to_class[pred_idx]
-                y_pred_binary.append(pred_key[0])  # label=True/False
-
-        y_pred_binary = np.array(y_pred_binary)
-
-        # Metrics
-        precision, recall, f1, _ = precision_recall_fscore_support(
-            y_true_binary, y_pred_binary, average="binary", zero_division=0
-        )
-        acc = accuracy_score(y_true_binary, y_pred_binary)
-        tn, fp, fn, tp = confusion_matrix(
-            y_true_binary, y_pred_binary, labels=[False, True]
-        ).ravel()
-        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
-        fpr = fp / (fp + tn) if (fp + tn) > 0 else 0
-        fnr = fn / (fn + tp) if (fn + tp) > 0 else 0
-        tpr = tp / (tp + fn) if (tp + fn) > 0 else 0
-        tnr = tn / (tn + fp) if (tn + fp) > 0 else 0
-        mcc = matthews_corrcoef(y_true_binary, y_pred_binary)
-
-        all_embeddings_np = all_embeddings.numpy()
-        all_labels_np = np.array(all_labels)
-
-        # Plot UMAP
-        self._plot_umap(all_embeddings_np, all_class_keys, split_name)
-
-        all_embeddings_gpu = all_embeddings.to(DEVICE)
-        all_labels_tensor = torch.tensor(all_labels, device=DEVICE)
-        prototypes = self._compute_prototypes(all_embeddings_gpu, all_labels_tensor)
-
-        # 构造 class labels（字符串形式，用于 heatmap 显示）
-        unique_labels = sorted(set(all_labels))
-        class_labels = [
-            f"{self.idx_to_class[idx][1]}_{self.idx_to_class[idx][0]}"
-            for idx in unique_labels
-        ]
-
-        # 绘制热力图
-        self._plot_prototype_heatmap(prototypes, class_labels, split_name)
-
-        metrics = {
-            "accuracy": float(acc),
-            "precision": float(precision),
-            "recall": float(recall),
-            "f1": float(f1),
-            "specificity": float(specificity),
-            "fpr": float(fpr),
-            "fnr": float(fnr),
-            "tpr": float(tpr),
-            "tnr": float(tnr),
-            "mcc": float(mcc),
-        }
-
-        # Save metrics
-        with open(os.path.join(OUTPUT_DIR, f"metrics_{split_name}.json"), "w") as f:
-            json.dump(metrics, f, indent=4)
-
-        return metrics
+        return (
+            ch_score,
+            nmi_score,
+            avg_val_loss,
+            ami_score,
+            ari_score,
+            dbi_score,
+            dunn_score,
+            separation_score,
+            avg_val_loss,
+        )  # ✅ Now returns val loss
 
     def train(self):
         train_loader = DataLoader(
@@ -780,8 +786,6 @@ class Trainer:
                     momentum_embeddings, momentum_labels
                 )
             else:
-                # <<< REMOVED _update_memory_buffer CALL HERE >>>
-                # Memory buffer is updated in the training loop per batch
                 margins = self._compute_dynamic_margins(
                     self.memory_buffer, self.memory_labels
                 )
@@ -822,7 +826,6 @@ class Trainer:
                             + (1 - ALPHA) * features_norm
                         )
                     sample_offset += batch_size
-                # ========================================================
 
                 if USE_MOMENTUM_ENCODER:
                     # Update momentum encoder
@@ -840,100 +843,25 @@ class Trainer:
             avg_loss = total_loss / len(train_loader)
 
             # Evaluate on validation set
-            ch_score, nmi_score = self._evaluate_epoch(val_loader, "val", epoch + 1)
+            (
+                ch_score,
+                nmi_score,
+                avg_val_loss,
+                ami_score,
+                ari_score,
+                dbi_score,
+                dunn_score,
+                separation_score,
+                avg_val_loss,
+            ) = self._evaluate_current_epoch(val_loader, "val", epoch + 1)
+            print(f"Train Loss: {avg_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
             print(
-                f"""Val CH: {ch_score:.4f}, NMI: {nmi_score:.4f}, 
-Avg Loss: {avg_loss:.4f}, History Best Loss: ${self.best_val_loss:.4f}
-Loss Kappa: {loss_kappa.item():.4f}, Loss Proto: {loss_proto.item():.4f}"""
+                f"Val CH Score: {ch_score:.4f} | NMI: {nmi_score:.4f} | AMI: {ami_score:.4f} | ARI: {ari_score:.4f} | DBI: {dbi_score:.4f} | Dunn: {dunn_score:.4f} | Separation: {separation_score:.4f}"
             )
 
-            # Early stopping
-            if avg_loss < self.best_val_loss:
-                self.best_val_loss = avg_loss
-                self.patience_counter = 0
-                # Save best model
-                torch.save(
-                    self.model.state_dict(), os.path.join(OUTPUT_DIR, "best_model.pth")
-                )
-            else:
-                self.patience_counter += 1
-                print(
-                    f"Patience Counter: {self.patience_counter}/{EARLY_STOPPING_PATIENCE}"
-                )
-
-            if self.patience_counter >= EARLY_STOPPING_PATIENCE:
-                print("Early stopping triggered.")
-                break
-
-        # Final evaluation on test set
-        print("Loading best model for final evaluation...")
-        self.model.load_state_dict(
-            torch.load(os.path.join(OUTPUT_DIR, "best_model.pth"))
-        )
-
-        # Compute prototypes and thresholds from training set
-        # Step 1: Compute prototypes from TRAIN set (model representation)
-        self.model.eval()
-        train_loader_full = DataLoader(
-            self.train_dataset,
-            batch_size=BATCH_SIZE,
-            shuffle=False,
-            collate_fn=custom_collate_fn,
-        )
-        all_train_embs = []
-        all_train_labels = []
-        with torch.no_grad():
-            for batch in tqdm(train_loader_full, desc="Computing train embeddings for prototypes"):
-                embs = self.model(
-                    batch["input_ids"].to(DEVICE), batch["attention_mask"].to(DEVICE)
-                )
-                all_train_embs.append(embs)
-                label_indices = [self.class_to_idx[k] for k in batch["class_key"]]
-                all_train_labels.extend(label_indices)
-        all_train_embs = torch.cat(all_train_embs, dim=0)
-        all_train_labels = torch.tensor(all_train_labels, device=DEVICE)
-        prototypes = self._compute_prototypes(all_train_embs, all_train_labels)
-
-        # Step 2: Compute thresholds from VALIDATION set (hyperparameter tuning)
-        val_loader_full = DataLoader(
-            self.val_dataset,
-            batch_size=BATCH_SIZE,
-            shuffle=False,
-            collate_fn=custom_collate_fn,
-        )
-        all_val_embs = []
-        all_val_labels = []
-        with torch.no_grad():
-            for batch in tqdm(val_loader_full, desc="Computing val embeddings for thresholds"):
-                embs = self.model(
-                    batch["input_ids"].to(DEVICE), batch["attention_mask"].to(DEVICE)
-                )
-                all_val_embs.append(embs)
-                label_indices = [self.class_to_idx[k] for k in batch["class_key"]]
-                all_val_labels.extend(label_indices)
-        all_val_embs = torch.cat(all_val_embs, dim=0)
-        all_val_labels = torch.tensor(all_val_labels, device=DEVICE)
-        thresholds = self._compute_thresholds_from_embeddings(
-            all_val_embs, all_val_labels, prototypes
-        )
-
-        test_loader = DataLoader(
-            self.test_dataset,
-            batch_size=BATCH_SIZE,
-            shuffle=False,
-            collate_fn=custom_collate_fn,
-        )
-        test_metrics = self._evaluate_final(test_loader, thresholds, prototypes, "test")
-        print("Test Metrics:", test_metrics)
-
-        val_loader = DataLoader(
-            self.val_dataset,
-            batch_size=BATCH_SIZE,
-            shuffle=False,
-            collate_fn=custom_collate_fn,
-        )
-        val_metrics = self._evaluate_final(val_loader, thresholds, prototypes, "val")
-        print("Val Metrics:", val_metrics)
+            torch.save(
+                self.model.state_dict(), os.path.join(OUTPUT_DIR, "best_model.pth")
+            )
 
 
 # ========================
@@ -956,12 +884,15 @@ def main():
     print(f"Prototype Loss Weight: {LAMBDA_PROTO}")
     print(f"Using Momentum Encoder: {USE_MOMENTUM_ENCODER}")
     print(f"Output Directory: {OUTPUT_DIR}")
+
+    save_training_config()
+
     print("======================================================")
 
     # Load dataset
     dataset = load_dataset(DATASET_NAME, SUBSET_NAME)
     train_data = dataset["train"]
-    val_data = dataset["validation"] if "validation" in dataset else dataset["val"]
+    val_data = dataset["val"]
     test_data = dataset["test"]
 
     # Build class mapping
